@@ -1,0 +1,11 @@
+.scratch/
+.venv/
+__pycache__/
+prepared_data/
+final_dataset/
+checkpoints*/
+job-*.out
+job-*.err
+.env
+.env.*
+*.sh 

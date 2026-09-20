@@ -1,0 +1,1 @@
+If a temporary file, script, or virtual environment is needed, create it inside this folder (e.g. under a local `.scratch/` or `.venv/` directory here) instead of creating any file outside this folder 
