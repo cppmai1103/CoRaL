@@ -26,16 +26,16 @@ for per-dimension splits:
     language, so that dimension's score distribution is preserved across
     train/validation/test
 
-Input: final_dataset/<language>/<language>_clean.csv (from cppmai/sea-rater).
-Output per dimension: prepared_data/split_manifest_<dimension>.csv
-Shared output: prepared_data/document_table.csv (all 5 raw scores and all 5
-    per-dimension split columns), prepared_data/excluded_documents.csv
+Input: data/annotation_batches/<language>/<language>_clean.csv (from cppmai/sea-rater).
+Output per dimension: data/rater_dataset/split_manifest_<dimension>.csv
+Shared output: data/rater_dataset/document_table.csv (all 5 raw scores and all 5
+    per-dimension split columns), data/rater_dataset/excluded_documents.csv
     (long format, one row per excluded document x dimension),
-    prepared_data/data_quality_report.md
+    data/rater_dataset/data_quality_report.md
 
 Usage:
     python -m src.prepare_dataset
-    python -m src.prepare_dataset --input-dir final_dataset --output-dir prepared_data
+    python -m src.prepare_dataset --input-dir data/annotation_batches --output-dir data/rater_dataset
 """
 
 import argparse
@@ -274,8 +274,8 @@ def build_report(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--input-dir", default="final_dataset", type=Path)
-    parser.add_argument("--output-dir", default="prepared_data", type=Path)
+    parser.add_argument("--input-dir", default="data/annotation_batches", type=Path)
+    parser.add_argument("--output-dir", default="data/rater_dataset", type=Path)
     parser.add_argument("--seed", default=DEFAULT_SEED, type=int)
     parser.add_argument("--train-ratio", default=DEFAULT_SPLIT_RATIOS["train"], type=float)
     parser.add_argument("--val-ratio", default=DEFAULT_SPLIT_RATIOS["validation"], type=float)

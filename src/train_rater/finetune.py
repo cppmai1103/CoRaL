@@ -1,10 +1,10 @@
 """Fully fine-tune mmBERT-base as a SEA-Rater regressor (Meta-rater style).
 
-Unlike src.train (frozen encoder + MLP head on cached embeddings), this trains
+Unlike src.train_rater.train (frozen encoder + MLP head on cached embeddings), this trains
 the whole model end to end: `AutoModelForSequenceClassification` with
 `num_labels=1` / `problem_type="regression"`, so the loss is MSE against the
 human-mean score. One model per dimension, each on its own independent split
-(prepared_data/split_manifest_<dimension>.csv). Documents are fed in one pass
+(data/rater_dataset/split_manifest_<dimension>.csv). Documents are fed in one pass
 (truncated at --max-length; the longest document in the current data is 3,947
 tokens, so 4096 truncates nothing).
 
@@ -16,15 +16,15 @@ regression head:
 The pretrained prediction head (dense + norm) is kept; only the final
 `classifier` layer is new. It gets its own higher learning rate and its bias is
 initialised to the training-mean score. Checkpoints are selected by validation
-macro-MAE, as in src.train; the test split is never used for selection.
+macro-MAE, as in src.train_rater.train; the test split is never used for selection.
 
 Run from the project root:
-    python -m src.finetune --dimension all --pooling cls
-    python -m src.finetune --dimension all --pooling mean
-    python -m src.finetune --dimension reasoning --pooling mean --limit 32 --max-length 128 \\
+    python -m src.train_rater.finetune --dimension all --pooling cls
+    python -m src.train_rater.finetune --dimension all --pooling mean
+    python -m src.train_rater.finetune --dimension reasoning --pooling mean --limit 32 --max-length 128 \\
         --max-epochs 1 --batch-size 8 --micro-batch-size 4 --output-dir .scratch/finetune_smoke
 
-Outputs per dimension (same layout as src.train): config.json, training_log.csv,
+Outputs per dimension (same layout as src.train_rater.train): config.json, training_log.csv,
 predictions, evaluation_report.md, plots, and model/ (save_pretrained weights
 plus tokenizer, loadable with AutoModelForSequenceClassification). Combined PNGs
 are written to the output root. Requires torch, transformers and matplotlib.
@@ -36,23 +36,56 @@ import gc
 import json
 import math
 import random
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 if __package__:
-    from .plot import plot_score_range_overview, plot_test_metrics, plot_test_ranking
+    from .plot import (
+        load_test_predictions, plot_score_range_overview, plot_test_metrics, plot_test_ranking, plot_test_scatter,
+    )
     from .test import cells_from_predictions, macro_mae, report_from_predictions, write_csv
     from .train import DIMENSIONS, LanguageBalancedSampler, load_split_manifest
 else:
-    from plot import plot_score_range_overview, plot_test_metrics, plot_test_ranking
+    from plot import (
+        load_test_predictions, plot_score_range_overview, plot_test_metrics, plot_test_ranking, plot_test_scatter,
+    )
     from test import cells_from_predictions, macro_mae, report_from_predictions, write_csv
     from train import DIMENSIONS, LanguageBalancedSampler, load_split_manifest
 
 DEFAULT_ENCODER = "jhu-clsp/mmBERT-base"
+
+PROGRESS = True  # set from --no-progress
+
+
+class _LineWriter:
+    """tqdm redraws with carriage returns, which turn a SLURM log file into one
+    giant line. Emit one line per update instead when stdout is not a terminal."""
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text: str) -> int:
+        text = text.replace("\r", "").rstrip()
+        if text:
+            self.stream.write(text + "\n")
+        return len(text)
+
+    def flush(self) -> None:
+        self.stream.flush()
+
+
+def progress(iterable, **kwargs):
+    """tqdm bar over `iterable`; interactive on a terminal, sparse plain lines in a log file."""
+    if sys.stdout.isatty():
+        return tqdm(iterable, disable=not PROGRESS, file=sys.stdout, **kwargs)
+    return tqdm(iterable, disable=not PROGRESS, file=_LineWriter(sys.stdout), mininterval=30, maxinterval=60,
+                dynamic_ncols=False, ncols=110, **kwargs)
 
 DEFAULT_CONFIG = {
     "pooling": "cls",
@@ -157,14 +190,16 @@ def autocast_ctx(device, use_bf16: bool):
 
 
 @torch.no_grad()
-def predict_records(model, records: list[dict], pad_id: int, device, batch_size: int, use_bf16: bool) -> list[float]:
-    """Raw predictions in the same order as `records`."""
+def predict_records(model, records: list[dict], pad_id: int, device, batch_size: int, use_bf16: bool,
+                    desc: str | None = None) -> list[float]:
+    """Raw predictions in the same order as `records`. `desc` labels a progress bar."""
     if not records:
         return []
     model.eval()
     order = sorted(range(len(records)), key=lambda i: len(records[i]["input_ids"]))
     preds = [0.0] * len(records)
-    for start in range(0, len(order), batch_size):
+    starts = range(0, len(order), batch_size)
+    for start in (progress(starts, desc=desc, unit="batch", leave=False) if desc else starts):
         idx = order[start:start + batch_size]
         input_ids, attention_mask, _ = collate([records[i] for i in idx], pad_id, device)
         with autocast_ctx(device, use_bf16):
@@ -211,7 +246,9 @@ def train_dimension(dimension: str, dataset: dict[str, list[dict]], tokenizer, c
     for epoch in range(1, cfg["max_epochs"] + 1):
         model.train()
         epoch_loss, started = 0.0, time.time()
-        for _ in range(steps_per_epoch):
+        bar = progress(range(steps_per_epoch), desc=f"{dimension} epoch {epoch}/{cfg['max_epochs']} train",
+                       unit="step", leave=False)
+        for step in bar:
             batch = [train[i] for i in sampler.sample_batch()]
             batch.sort(key=lambda r: len(r["input_ids"]))  # less padding per micro-batch
             optimizer.zero_grad(set_to_none=True)
@@ -228,9 +265,11 @@ def train_dimension(dimension: str, dataset: dict[str, list[dict]], tokenizer, c
             optimizer.step()
             scheduler.step()
             epoch_loss += step_loss
+            bar.set_postfix(loss=f"{epoch_loss / (step + 1):.4f}", refresh=False)
         epoch_loss /= steps_per_epoch
 
-        val_raw = predict_records(model, val, pad_id, device, cfg["eval_batch_size"], use_bf16)
+        val_raw = predict_records(model, val, pad_id, device, cfg["eval_batch_size"], use_bf16,
+                                  desc=f"{dimension} epoch {epoch}/{cfg['max_epochs']} val")
         val_macro = macro_mae(cells_from_predictions(val, val_raw)) if val else float("nan")
         log_rows.append({"epoch": epoch, "train_loss": epoch_loss, "val_macro_mae": val_macro})
 
@@ -241,8 +280,10 @@ def train_dimension(dimension: str, dataset: dict[str, list[dict]], tokenizer, c
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
+        peak = (f", peak GPU mem {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB"
+                if torch.device(device).type == "cuda" else "")
         print(f"    epoch={epoch:2d} train_loss={epoch_loss:.4f} val_macro_mae={val_macro:.4f}"
-              f" ({time.time() - started:.0f}s){' *' if improved else ''}")
+              f" ({time.time() - started:.0f}s{peak}){' *' if improved else ''}")
         if epochs_without_improvement >= cfg["patience"]:
             print(f"    early stopping at epoch {epoch} (best epoch {best_epoch}, val_macro_mae={best_val_macro_mae:.4f})")
             break
@@ -270,8 +311,10 @@ def run_dimension(dimension: str, args, cfg: dict, tokenizer, token_ids: dict, d
     write_csv(out_dir / "training_log.csv", log_rows, ["epoch", "train_loss", "val_macro_mae"])
 
     pad_id = tokenizer.pad_token_id
-    val_raw = predict_records(model, dataset.get("validation", []), pad_id, device, cfg["eval_batch_size"], cfg["bf16"])
-    test_raw = predict_records(model, dataset.get("test", []), pad_id, device, cfg["eval_batch_size"], cfg["bf16"])
+    val_raw = predict_records(model, dataset.get("validation", []), pad_id, device, cfg["eval_batch_size"], cfg["bf16"],
+                              desc=f"{dimension} best model, validation")
+    test_raw = predict_records(model, dataset.get("test", []), pad_id, device, cfg["eval_batch_size"], cfg["bf16"],
+                               desc=f"{dimension} best model, test")
     test_cells, range_rows = report_from_predictions(dataset, val_raw, test_raw, dimension, out_dir, best_epoch)
 
     if not args.no_save_model:
@@ -292,10 +335,10 @@ def main():
     parser.add_argument("--dimension", required=True, choices=DIMENSIONS + ["all"])
     parser.add_argument("--pooling", choices=["cls", "mean"], default=DEFAULT_CONFIG["pooling"])
     parser.add_argument("--encoder", default=DEFAULT_ENCODER)
-    parser.add_argument("--document-table", default="prepared_data/document_table.csv", type=Path)
-    parser.add_argument("--split-manifest-dir", default="prepared_data", type=Path)
+    parser.add_argument("--document-table", default="data/rater_dataset/document_table.csv", type=Path)
+    parser.add_argument("--split-manifest-dir", default="data/rater_dataset", type=Path)
     parser.add_argument("--output-dir", default=None, type=Path,
-                        help="Default: checkpoints_finetune/<pooling>")
+                        help="Default: checkpoints/rater/finetuned/<pooling>")
     parser.add_argument("--max-length", type=int, default=DEFAULT_CONFIG["max_length"])
     parser.add_argument("--batch-size", type=int, default=DEFAULT_CONFIG["batch_size"],
                         help="Effective batch per optimizer step (language-balanced)")
@@ -311,6 +354,7 @@ def main():
     parser.add_argument("--min-delta", type=float, default=DEFAULT_CONFIG["min_delta"])
     parser.add_argument("--grad-clip-norm", type=float, default=DEFAULT_CONFIG["grad_clip_norm"])
     parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG["seed"])
+    parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     parser.add_argument("--no-bf16", action="store_true", help="Disable bf16 autocast on GPU")
     parser.add_argument("--gradient-checkpointing", action="store_true", help="Trade speed for memory")
     parser.add_argument("--no-save-model", action="store_true", help="Skip saving model weights (~600 MB per dimension)")
@@ -318,8 +362,10 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
+    global PROGRESS
+    PROGRESS = not args.no_progress
     if args.output_dir is None:
-        args.output_dir = Path("checkpoints_finetune") / args.pooling
+        args.output_dir = Path("checkpoints/rater/finetuned") / args.pooling
     if args.micro_batch_size > args.batch_size:
         raise SystemExit("--micro-batch-size cannot exceed --batch-size")
 
@@ -365,6 +411,8 @@ def main():
     plot_test_metrics(args.output_dir / "test_metrics.png", results,
                       provenance=f"Fine-tuned {args.encoder}, {args.pooling} pooling.")
     plot_score_range_overview(args.output_dir / "test_score_ranges.png", ranges_by_dimension)
+    plot_test_scatter(args.output_dir / "test_scatter.png",
+                      load_test_predictions(args.output_dir, list(results)))
 
 
 if __name__ == "__main__":

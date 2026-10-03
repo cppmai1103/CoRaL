@@ -5,8 +5,8 @@ Train with MSE and language-balanced batches; select checkpoints by validation
 macro-MAE. One run per dimension uses a fixed internal seed for reproducibility.
 
 Run from the project root:
-    python -m src.train --dimension all
-    python src/train.py --dimension educational_value
+    python -m src.train_rater.train --dimension all
+    python src/train_rater/train.py --dimension educational_value
 
 Outputs per dimension: checkpoint.pt, config.json, predictions, reports,
 test_score_ranges.png, test_ranking.png, and test_metrics.png. Combined PNGs
@@ -27,10 +27,14 @@ import torch.nn.functional as F
 
 if __package__:
     from .test import evaluate_and_report, evaluate_split, macro_mae, write_csv
-    from .plot import plot_score_range_overview, plot_test_metrics, plot_test_ranking
+    from .plot import (
+        load_test_predictions, plot_score_range_overview, plot_test_metrics, plot_test_ranking, plot_test_scatter,
+    )
 else:
     from test import evaluate_and_report, evaluate_split, macro_mae, write_csv
-    from plot import plot_score_range_overview, plot_test_metrics, plot_test_ranking
+    from plot import (
+        load_test_predictions, plot_score_range_overview, plot_test_metrics, plot_test_ranking, plot_test_scatter,
+    )
 
 DIMENSIONS = [
     "educational_value",
@@ -58,7 +62,7 @@ DEFAULT_CONFIG = {
 def load_embeddings(path: Path) -> dict[tuple[str, str], torch.Tensor]:
     payload = torch.load(path, map_location="cpu")
     if "languages" not in payload:
-        raise ValueError("Embedding cache has no languages; rebuild it with python -m src.build_embeddings")
+        raise ValueError("Embedding cache has no languages; rebuild it with python -m src.train_rater.build_embeddings")
     if not (len(payload["languages"]) == len(payload["doc_ids"]) == len(payload["embeddings"])):
         raise ValueError("Embedding cache languages, document IDs, and vectors have different lengths")
     embeddings = {}
@@ -264,9 +268,9 @@ def run_dimension(dimension: str, args, cfg: dict, device) -> tuple[dict[str, di
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dimension", required=True, choices=DIMENSIONS + ["all"])
-    parser.add_argument("--split-manifest-dir", default="prepared_data", type=Path)
-    parser.add_argument("--embeddings", default="prepared_data/embeddings/embeddings.pt", type=Path)
-    parser.add_argument("--output-dir", default="checkpoints", type=Path)
+    parser.add_argument("--split-manifest-dir", default="data/rater_dataset", type=Path)
+    parser.add_argument("--embeddings", default="data/rater_dataset/embeddings/embeddings.pt", type=Path)
+    parser.add_argument("--output-dir", default="checkpoints/rater/frozen", type=Path)
     parser.add_argument("--hidden-size", type=int, default=DEFAULT_CONFIG["hidden_size"])
     parser.add_argument("--dropout", type=float, default=DEFAULT_CONFIG["dropout"])
     parser.add_argument("--lr", type=float, default=DEFAULT_CONFIG["lr"])
@@ -298,6 +302,8 @@ def main():
     plot_test_ranking(args.output_dir / "test_ranking.png", results)
     plot_test_metrics(args.output_dir / "test_metrics.png", results)
     plot_score_range_overview(args.output_dir / "test_score_ranges.png", ranges_by_dimension)
+    plot_test_scatter(args.output_dir / "test_scatter.png",
+                      load_test_predictions(args.output_dir, list(results)))
 
 
 if __name__ == "__main__":

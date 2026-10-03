@@ -4,7 +4,7 @@ Multidimensional data quality assessment and selection for Southeast Asian langu
 
 **Current status:** Human annotation is complete. The next milestone is to prepare the annotation dataset for training and establish a multilingual quality-rater baseline.
 
-This README describes the project idea and overall workflow. The first implementation guide is [01_train_rater.md](01_train_rater.md), covering annotation preparation and multilingual rater training. These documents specify the workflow; they do not imply that training has already been run.
+This README describes the project idea and overall workflow. The first implementation guide is [01_train_rater.md](docs/01_train_rater.md), covering annotation preparation and multilingual rater training. These documents specify the workflow; they do not imply that training has already been run.
 
 ## Running the code
 
@@ -12,18 +12,65 @@ Python code lives in `src/`. Run commands from the project root so the default
 dataset, embedding, and checkpoint paths resolve correctly:
 
 ```bash
-python -m src.download_from_huggingface --local-dir final_dataset
-python -m src.prepare_dataset --input-dir final_dataset --output-dir prepared_data
-python -m src.build_embeddings --document-table prepared_data/document_table.csv --output-dir prepared_data/embeddings
-python -m src.train --dimension all --output-dir checkpoints
+python -m src.download_from_huggingface --local-dir data/annotation_batches
+python -m src.prepare_dataset --input-dir data/annotation_batches --output-dir data/rater_dataset
+python -m src.train_rater.build_embeddings --document-table data/rater_dataset/document_table.csv --output-dir data/rater_dataset/embeddings
+python -m src.train_rater.train --dimension all --output-dir checkpoints/rater/frozen
 ```
 
-`src/train.py` loads data, trains the regression heads, and orchestrates the run.
-`src/test.py` handles inference, validation/test metrics, and reports.
-`src/plot.py` generates PNGs for score ranges, ranking, and MAE/RMSE/within-1
+`src/train_rater/train.py` loads data, trains the regression heads, and orchestrates the run.
+`src/train_rater/test.py` handles inference, validation/test metrics, and reports.
+`src/train_rater/plot.py` generates PNGs for score ranges, ranking, and MAE/RMSE/within-1
 accuracy. Evaluation and plotting run automatically after training. Each
 dimension's outputs go under `<output-dir>/<dimension>/`, with combined plots
 in `<output-dir>/`. The launchers use the same module entry points.
+
+### Upload data and checkpoints to Hugging Face
+
+`src/upload_to_huggingface.py` packages the data and completed experiment results
+for two **private** repositories. Defaults are dataset `cppmai/sea-rater` and
+model `cppmai/sea-rater-models`. If a destination already exists and is public,
+the script makes it private and verifies this before uploading any files.
+
+```bash
+python -m pip install --upgrade huggingface_hub pyyaml
+hf auth login
+
+# Offline preview: prepares the exact files and SHA-256 manifests locally.
+python -m src.upload_to_huggingface --dry-run
+
+# Upload both private repositories using the defaults.
+python -m src.upload_to_huggingface
+```
+
+Authentication also accepts `HF_TOKEN` from the environment. Do not put a token
+in the script. No GPU, Git remote, or Git LFS setup is needed for the upload.
+
+The dataset repository receives the language directories from `data/annotation_batches/`
+(including CSVs, annotation spreadsheets and figures), the prepared document
+table, per-dimension split manifests, exclusion report and encoder manifests.
+Its generated card explicitly exposes the complete document table as a
+`documents` split for browsing; training uses each dimension's saved splits.
+Embedding tensors are omitted unless `--include-embeddings` is supplied.
+
+The model repository receives all runs under `checkpoints/rater/frozen/`, preserving
+both `mlp_mean` and `mlp_cls`, plus head configurations,
+predictions, logs, reports, PNGs, encoder manifests, and the Python code needed
+to reconstruct the heads and embeddings. The frozen encoder is a separate
+upstream dependency; these are custom PyTorch heads, not a full Transformers
+model package. The script validates required checkpoint files before upload.
+
+```bash
+# Change repository names, upload one side, or select one model run.
+python -m src.upload_to_huggingface --dataset-repo cppmai/sea-rater-data --model-repo cppmai/sea-rater-models
+python -m src.upload_to_huggingface --only dataset --include-embeddings
+python -m src.upload_to_huggingface --only model --checkpoint-dir checkpoints/rater/frozen/mlp_mean
+```
+
+Local packages and complete file inventories stay under `.scratch/hf_upload/`.
+Hidden/cache files and shell launchers are excluded. Uploads update matching
+remote paths, including the generated root README, without deleting other
+remote files. Re-running the command can retry a failed upload.
 
 ## Agreed training decisions
 
@@ -109,7 +156,7 @@ Use a fixed, independent **70% train / 10% validation / 20% test split for each 
 
 Evaluate MAE, RMSE, signed bias, within-0.5/within-1 accuracy, and Spearman separately for every language and dimension. Select the initial checkpoint using validation macro-MAE, with Spearman and per-group errors reported alongside it. Keep the human test set for final reporting. Compare encoder fine-tuning only after the baseline is established.
 
-See [01_train_rater.md](01_train_rater.md) for the data contract, loss, starting configuration, training sequence, and required outputs.
+See [01_train_rater.md](docs/01_train_rater.md) for the data contract, loss, starting configuration, training sequence, and required outputs.
 
 **Output:** A baseline rater, per-language results, and reproducible training settings.
 
@@ -183,7 +230,7 @@ Connect rater reliability, changes in the corpus, and downstream outcomes. Repor
 | Language-model experiments | Scratch or continued training, model architecture, adaptation method, and feasible budget |
 | Evaluation | Task-language coverage, cultural evaluation, downstream language-model checkpoint selection, and uncertainty reporting; the initial rater uses validation macro-MAE |
 
-Detailed guides specify the inputs, procedure, checks, outputs, and experiment settings for each step. [01_train_rater.md](01_train_rater.md) is the first guide and covers workflow Steps 1 and 2 together. Later guides will cover supervision comparisons, corpus scoring, selection, and language-model experiments.
+Detailed guides specify the inputs, procedure, checks, outputs, and experiment settings for each step. [01_train_rater.md](docs/01_train_rater.md) is the first guide and covers workflow Steps 1 and 2 together. Later guides will cover supervision comparisons, corpus scoring, selection, and language-model experiments.
 
 ## 7. References
 

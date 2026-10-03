@@ -6,7 +6,7 @@ Setup (one-time):
 
 Usage:
     python -m src.download_from_huggingface
-    python -m src.download_from_huggingface --local-dir final_dataset --revision main
+    python -m src.download_from_huggingface --local-dir data/annotation_batches --revision main
 """
 
 import argparse
@@ -18,7 +18,7 @@ REPO_ID = "cppmai/sea-rater"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--local-dir", default="final_dataset", help="Directory to download into (default: final_dataset)")
+    parser.add_argument("--local-dir", default="data/annotation_batches", help="Directory to download into (default: data/annotation_batches)")
     parser.add_argument("--revision", default=None, help="Branch, tag, or commit hash to download (default: latest)")
     args = parser.parse_args()
 

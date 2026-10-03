@@ -1,9 +1,10 @@
-"""PNG plots for score ranges, ranking, and test error summaries.
+"""PNG plots for score ranges, ranking, test error summaries, and human-vs-rater scatter.
 
-Called by src.train and src.test; all functions accept the current run's
+Called by src.train_rater.train and src.train_rater.test; all functions accept the current run's
 metrics and an explicit output path. Plotting uses a headless backend.
 """
 
+import csv
 import math
 from pathlib import Path
 
@@ -222,3 +223,104 @@ def plot_test_metrics(path: Path, cells_by_dimension: dict[str, dict[str, dict]]
     fig.savefig(path, dpi=180)
     plt.close(fig)
     print(f"  Saved test metrics plot: {path}")
+
+
+DIMENSION_ORDER = ["educational_value", "reasoning", "professionalism", "cleanliness", "cultural_nuances"]
+
+
+def load_test_predictions(output_dir: Path, dimensions: list[str]) -> dict[str, list[dict]]:
+    """Read each dimension's predictions_test.csv written by the training scripts."""
+    data = {}
+    for dim in dimensions:
+        path = output_dir / dim / "predictions_test.csv"
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8") as f:
+            data[dim] = [
+                {"language": r["language"], "human": float(r["human_mean"]), "rater": float(r["clipped_prediction"])}
+                for r in csv.DictReader(f)
+            ]
+    return data
+
+
+def plot_test_scatter(path: Path, points_by_dimension: dict[str, list[dict]], title: str = "") -> None:
+    """Rater-vs-human scatter grid: x = human score, y = rater score.
+
+    Columns are dimensions. The first row pools all languages (points colored by
+    language); each following row shows one language alone. Points are test
+    documents with rater scores clipped to [0,5]; the dashed diagonal is perfect
+    agreement. Human scores lie on a 0.25 grid, so points are semi-transparent
+    to show density."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if __package__:
+        from .test import spearman
+    else:
+        from test import spearman
+
+    dims = [d for d in DIMENSION_ORDER if d in points_by_dimension] + \
+           [d for d in points_by_dimension if d not in DIMENSION_ORDER]
+    if not dims:
+        return
+    languages = sorted({pt["language"] for pts in points_by_dimension.values() for pt in pts})
+    colors = {lang: plt.get_cmap("tab10")(i % 10) for i, lang in enumerate(languages)}
+    row_names = ["All languages"] + languages
+
+    cell = 3.6
+    fig, axes = plt.subplots(len(row_names), len(dims), figsize=(cell * len(dims) + .6, cell * len(row_names) + 1.6),
+                             squeeze=False)
+    for r, row_name in enumerate(row_names):
+        for c, dim in enumerate(dims):
+            ax = axes[r][c]
+            pts = points_by_dimension[dim]
+            if r > 0:
+                pts = [pt for pt in pts if pt["language"] == row_name]
+            for lang in (languages if r == 0 else [row_name]):
+                sel = [pt for pt in pts if pt["language"] == lang]
+                ax.scatter([pt["human"] for pt in sel], [pt["rater"] for pt in sel], s=14, alpha=.35,
+                           linewidths=0, color=colors[lang])
+            ax.plot([0, 5], [0, 5], linestyle="--", color="#7f8c8d", linewidth=1)
+            ax.set_xlim(-.1, 5.1)
+            ax.set_ylim(-.1, 5.1)
+            ax.set_aspect("equal")
+            ax.grid(alpha=.25)
+            n = len(pts)
+            if n:
+                xs, ys = [pt["human"] for pt in pts], [pt["rater"] for pt in pts]
+                mae = sum(abs(x - y) for x, y in zip(xs, ys)) / n
+                rho = spearman(xs, ys)
+                stats = f"n={n}, MAE={mae:.3f}, Spearman={'NA' if rho is None else f'{rho:.3f}'}"
+            else:
+                stats = "no data"
+            head = f"{dim.replace('_', ' ').title()}\n" if r == 0 else ""
+            ax.set_title(head + stats, fontsize=10 if r == 0 else 9)
+            if c == 0:
+                ax.set_ylabel(f"{row_name}\nRater score", fontsize=10, fontweight="bold" if r == 0 else "normal")
+            if r == len(row_names) - 1:
+                ax.set_xlabel("Human score")
+    handles = [plt.Line2D([], [], marker="o", linestyle="", color=colors[lang], label=lang, alpha=.8)
+               for lang in languages]
+    handles += [plt.Line2D([], [], linestyle="--", color="#7f8c8d", label="perfect agreement (y = x)")]
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False, bbox_to_anchor=(.5, .012))
+    fig.suptitle(title or "Rater score vs human score (test set)", fontsize=14)
+    fig.text(.5, .003, "Rater scores clipped to [0,5]. Top row pools all languages; each other row is one language. "
+             "Spearman and MAE are computed on the points in that panel.", ha="center", fontsize=8)
+    fig.tight_layout(rect=(0, .035, 1, .975))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    print(f"  Saved human-vs-rater scatter plot: {path}")
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Regenerate the human-vs-rater scatter plot from existing predictions.")
+    parser.add_argument("--output-dir", required=True, type=Path,
+                        help="Run folder containing <dimension>/predictions_test.csv (e.g. checkpoints/rater/frozen/mlp_mean)")
+    args = parser.parse_args()
+    data = load_test_predictions(args.output_dir, DIMENSION_ORDER)
+    if not data:
+        raise SystemExit(f"No <dimension>/predictions_test.csv found under {args.output_dir}")
+    plot_test_scatter(args.output_dir / "test_scatter.png", data, f"Rater vs human score (test set): {args.output_dir.name}")

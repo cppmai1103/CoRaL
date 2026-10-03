@@ -1,7 +1,7 @@
 """Build the frozen multilingual document-embedding cache (01_train_rater.md
 section 5). Runs once; every dimension's rater training reuses this cache.
 
-For each document in prepared_data/document_table.csv:
+For each document in data/rater_dataset/document_table.csv:
   1. Tokenize without truncation.
   2. Split into non-overlapping chunks of at most --max-chunk-tokens tokens
      (including special tokens).
@@ -13,14 +13,14 @@ For each document in prepared_data/document_table.csv:
      count per chunk) into one embedding per document.
 
 Requires a GPU-capable environment with `torch` and `transformers` installed
-(see run_job.sh / script_cpu.sh) -- this does not run in a plain sandbox.
+(see sh/run_job.sh / script_cpu.sh) -- this does not run in a plain sandbox.
 
 Usage:
-    python -m src.build_embeddings
-    python -m src.build_embeddings --pooling cls      # -> prepared_data/embeddings_cls
-    python -m src.build_embeddings --encoder jhu-clsp/mmBERT-base --revision main \
-        --document-table prepared_data/document_table.csv \
-        --output-dir prepared_data/embeddings
+    python -m src.train_rater.build_embeddings
+    python -m src.train_rater.build_embeddings --pooling cls      # -> data/rater_dataset/embeddings_cls
+    python -m src.train_rater.build_embeddings --encoder jhu-clsp/mmBERT-base --revision main \
+        --document-table data/rater_dataset/document_table.csv \
+        --output-dir data/rater_dataset/embeddings
 """
 
 import argparse
@@ -108,10 +108,10 @@ def embed_document(text: str, tokenizer, model, device, max_chunk_tokens: int, p
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--document-table", default="prepared_data/document_table.csv", type=Path)
+    parser.add_argument("--document-table", default="data/rater_dataset/document_table.csv", type=Path)
     parser.add_argument("--output-dir", default=None, type=Path,
-                        help="Default: prepared_data/embeddings for mean pooling, "
-                             "prepared_data/embeddings_<pooling> otherwise (never overwrites the mean cache)")
+                        help="Default: data/rater_dataset/embeddings for mean pooling, "
+                             "data/rater_dataset/embeddings_<pooling> otherwise (never overwrites the mean cache)")
     parser.add_argument("--pooling", default="mean", choices=list(POOLING_CONFIG_NAMES))
     parser.add_argument("--encoder", default=DEFAULT_ENCODER)
     parser.add_argument("--revision", default=None, help="Pin a specific model/tokenizer revision once verified")
@@ -133,7 +133,7 @@ def main():
 
     if args.output_dir is None:
         suffix = "" if args.pooling == "mean" else "_" + args.pooling.replace("+", "_")
-        args.output_dir = Path("prepared_data") / f"embeddings{suffix}"
+        args.output_dir = Path("data/rater_dataset") / f"embeddings{suffix}"
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.output_dir / "manifest.json"
