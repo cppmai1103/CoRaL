@@ -29,6 +29,21 @@ Run from the project root (GPU recommended for step 2; the GPT-2 checkpoints are
 also workable for a quick check):
     python -m src.train_gpt2_from_scratch.score_annotated_dataset
     python -m src.train_gpt2_from_scratch.score_annotated_dataset --runs random_5M_ep1_seed42 --device cpu
+
+A --runs entry containing "/" is a run folder path instead of a name under --runs-dir, and results are
+keyed by that path -- needed for runs outside checkpoints/gpt2_top_doc whose folder names clash with
+runs inside it, e.g. the quality-weighted-loss runs (sh/eval_annotated_weighted.sh):
+    python -m src.train_gpt2_from_scratch.score_annotated_dataset \
+        --output-dir data/rater_dataset/annotated_eval_weighted \
+        --runs checkpoints/gpt2_top_doc/random_20M_ep1_seed42 checkpoints/gpt2_weighted_loss/edu_20M_ep1_seed42
+The summaries' Δ loss column is relative to the first run listed.
+
+The high-quality subset can use another human score than avg5: --high-quality-by picks it (edu, avg4, avg5, or
+any single human dimension, e.g. cleanliness) and --high-quality-min-score switches from "top fraction per
+language" to "every document scoring at least this" -- needed for skewed, coarse dimensions like cleanliness,
+where most documents share the top score and a top-50% cut would split a tie arbitrarily by doc_id. Use a
+separate --output-dir per definition (file names do not encode it). E.g.:
+    --high-quality-by cleanliness --high-quality-min-score 5 --output-dir data/rater_dataset/annotated_eval_cleanliness
 """
 
 import argparse
@@ -96,12 +111,14 @@ def compute_importance_scores(rows: list[dict]) -> list[dict]:
             "edu": edu,
             "avg4": statistics.mean(avg4_vals) if all(v is not None for v in avg4_vals) else None,
             "avg5": statistics.mean(avg5_vals) if all(v is not None for v in avg5_vals) else None,
+            **{dim: val(dim) for dim in AVG5_DIMS},
         })
     return out
 
 
 def write_importance_scores(path: Path, scores: list[dict], high_quality_ids: set[str] | None = None) -> None:
-    fields = ["doc_id", "language", "edu", "avg4", "avg5"] + (["high_quality"] if high_quality_ids is not None else [])
+    fields = ["doc_id", "language", "edu", "avg4", "avg5"] + AVG5_DIMS + \
+             (["high_quality"] if high_quality_ids is not None else [])
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -112,22 +129,44 @@ def write_importance_scores(path: Path, scores: list[dict], high_quality_ids: se
             writer.writerow(row)
 
 
-def select_high_quality(scores: list[dict], fraction: float = 0.5) -> tuple[dict[str, set], dict[str, float]]:
-    """Per language, the top `fraction` of documents by avg5 (ties broken by doc_id). Returns
-    {language: {doc_id, ...}} and {language: threshold}, where threshold is the lowest avg5 score
-    kept -- the cutoff between the "high quality" and "low quality" halves."""
+def select_high_quality(scores: list[dict], fraction: float = 0.5, key: str = "avg5",
+                        min_score: float | None = None) -> tuple[dict[str, set], dict[str, float]]:
+    """Per language, the top `fraction` of documents by `key` (ties broken by doc_id), or, if `min_score`
+    is given, every document with `key` >= min_score (no tie splitting). Documents missing `key` are left
+    out. Returns {language: {doc_id, ...}} and {language: threshold}, where threshold is the lowest
+    `key` score kept -- the cutoff between the "high quality" and "low quality" parts."""
     by_language: dict[str, list[dict]] = {}
     for s in scores:
-        if s["avg5"] is not None:
+        if s[key] is not None:
             by_language.setdefault(s["language"], []).append(s)
     kept_ids, thresholds = {}, {}
     for language, docs in by_language.items():
-        ranked = sorted(docs, key=lambda s: (-s["avg5"], s["doc_id"]))
-        keep_n = round(len(ranked) * fraction)
-        kept = ranked[:keep_n]
+        ranked = sorted(docs, key=lambda s: (-s[key], s["doc_id"]))
+        if min_score is None:
+            kept = ranked[:round(len(ranked) * fraction)]
+        else:
+            kept = [s for s in ranked if s[key] >= min_score]
         kept_ids[language] = {s["doc_id"] for s in kept}
-        thresholds[language] = kept[-1]["avg5"] if kept else float("inf")
+        thresholds[language] = kept[-1][key] if kept else float("inf")
     return kept_ids, thresholds
+
+
+def selection_table(scores: list[dict], kept_ids: dict[str, set], key: str) -> list[str]:
+    """Per language: documents kept, share, and the `key` and avg5 score ranges inside and outside the subset."""
+    def rng(vals):
+        return f"{min(vals):.2f}–{max(vals):.2f} (mean {statistics.mean(vals):.2f})" if vals else "–"
+
+    lines = [f"| Language | High-quality docs | Share | {key} in subset | {key} outside | avg5 in subset | avg5 outside |",
+             "| --- | ---: | ---: | --- | --- | --- | --- |"]
+    for language in sorted(kept_ids):
+        docs = [s for s in scores if s["language"] == language and s[key] is not None]
+        inside = [s for s in docs if s["doc_id"] in kept_ids[language]]
+        outside = [s for s in docs if s["doc_id"] not in kept_ids[language]]
+        lines.append(f"| {language} | {len(inside)} / {len(docs)} | {len(inside) / len(docs):.0%} | "
+                     f"{rng([s[key] for s in inside])} | {rng([s[key] for s in outside])} | "
+                     f"{rng([s['avg5'] for s in inside if s['avg5'] is not None])} | "
+                     f"{rng([s['avg5'] for s in outside if s['avg5'] is not None])} |")
+    return lines
 
 
 def plot_importance_distribution(scores: list[dict], out_png: Path,
@@ -205,16 +244,28 @@ def evaluate_run(run_dir: Path, docs_by_language: dict[str, list[str]], language
 
 
 def format_eval_table(results: dict[str, dict]) -> list[str]:
-    lines = ["| Run | Tokens | Loss | Perplexity |", "| --- | --- | --- | --- |"]
+    lines = ["| Run | Tokens | Loss | Δ loss vs first run | Perplexity |", "| --- | --- | --- | --- | --- |"]
+    first = next(iter(results.values()), None)
     for name, r in results.items():
         tokens = sum(s["tokens"] for s in r["data_stats"].values())
-        lines.append(f"| {name} | {tokens:,} | {r['macro']['loss']:.4f} | {r['macro']['perplexity']:.1f} |")
+        delta = r["macro"]["loss"] - first["macro"]["loss"]
+        lines.append(f"| {name} | {tokens:,} | {r['macro']['loss']:.4f} | {delta:+.4f} | {r['macro']['perplexity']:.1f} |")
     return lines
 
 
-def write_gpt2_summary(path: Path, results: dict[str, dict], languages: list[str], description: str) -> None:
+def write_gpt2_summary(path: Path, results: dict[str, dict], languages: list[str], description: str,
+                       extra: list[str] | None = None) -> None:
     lines = ["# GPT-2 pilot checkpoints evaluated on the human-annotated dataset", "", description, ""]
+    if extra:
+        lines += extra + [""]
     lines += format_eval_table(results)
+    lines += ["", "## Per-language loss (Δ vs first run)", "",
+              "| Run | " + " | ".join(languages) + " |", "| --- |" + " --- |" * len(languages)]
+    first = next(iter(results.values()), None)
+    for name, r in results.items():
+        cells = [f"{r['per_language'][lang]['loss']:.4f} ({r['per_language'][lang]['loss'] - first['per_language'][lang]['loss']:+.4f})"
+                 for lang in languages]
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
     lines += ["", "## Per-language perplexity", "",
              "| Run | " + " | ".join(languages) + " |", "| --- |" + " --- |" * len(languages)]
     for name, r in results.items():
@@ -229,18 +280,22 @@ def run_all(run_names: list[str], runs_dir: Path, docs_by_language: dict[str, li
     """Evaluates each run, skipping ones already present in `results_path` (unless `force`), and
     rewrites `results_path` after every run -- so a SLURM timeout partway through only costs the
     runs after the last checkpoint, and a rerun picks up exactly where it left off."""
-    results = {}
+    saved = {}
     if results_path is not None and results_path.is_file() and not force:
-        results = json.loads(results_path.read_text())
-        if results:
-            print(f"  resuming from {results_path.name}: {len(results)} run(s) already done, skipping them",
+        saved = json.loads(results_path.read_text())
+        if saved:
+            print(f"  resuming from {results_path.name}: {len(saved)} run(s) already done, skipping them",
                   flush=True)
+    # Results follow the order of run_names (the summaries' Δ column is relative to the first run);
+    # runs recorded on disk but not requested now are kept after them.
+    results = {}
     for name in run_names:
-        if name in results:
+        if name in saved:
+            results[name] = saved[name]
             print(f"  [{name}] already in {results_path.name}, skipping (use --force to redo everything)",
                   flush=True)
             continue
-        run_dir = runs_dir / name
+        run_dir = Path(name) if "/" in name else runs_dir / name
         if not (run_dir / "final").is_dir():
             print(f"  [{name}] no trained checkpoint at {run_dir}/final, skipping", flush=True)
             continue
@@ -249,8 +304,8 @@ def run_all(run_names: list[str], runs_dir: Path, docs_by_language: dict[str, li
         print(f"  [{name}] loss={result['macro']['loss']:.4f}  perplexity={result['macro']['perplexity']:.1f}",
               flush=True)
         if results_path is not None:
-            results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    return results
+            results_path.write_text(json.dumps({**saved, **results}, indent=2), encoding="utf-8")
+    return {**results, **{k: v for k, v in saved.items() if k not in results}}
 
 
 # --------------------------------------------------------------------------
@@ -262,11 +317,17 @@ def main():
     parser.add_argument("--table", type=Path, default=DEFAULT_TABLE)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--runs", nargs="+", default=DEFAULT_RUNS,
-                        help="Run directory names under --runs-dir (default: the 12 "
-                             "{random,edu,avg4,avg5} x {5M,10M,20M} ep1_seed42 runs)")
+                        help="Run directory names under --runs-dir, or run folder paths (containing '/') "
+                             "(default: the 12 {random,edu,avg4,avg5} x {5M,10M,20M} ep1_seed42 runs). "
+                             "The first run is the reference for the summaries' Δ loss column")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--high-quality-fraction", type=float, default=0.5,
-                        help="Per-language top fraction by avg5 to also evaluate separately (default: top 50%%)")
+                        help="Per-language top fraction by --high-quality-by to also evaluate separately "
+                             "(default: top 50%%); ignored with --high-quality-min-score")
+    parser.add_argument("--high-quality-by", default="avg5", choices=["edu", "avg4", "avg5"] + AVG5_DIMS,
+                        help="Human score defining the high-quality subset (default: avg5)")
+    parser.add_argument("--high-quality-min-score", type=float, default=None,
+                        help="Keep every document with --high-quality-by >= this, instead of a top fraction")
     parser.add_argument("--eval-batch-size", type=int, default=16)
     parser.add_argument("--skip-full-eval", action="store_true",
                         help="Skip step 2+3a (the full-dataset GPT-2 pass) and only run the "
@@ -291,17 +352,24 @@ def main():
 
     print("=== step 1: importance scores from human labels ===", flush=True)
     scores = compute_importance_scores(rows)
-    high_quality_ids, thresholds = select_high_quality(scores, args.high_quality_fraction)
+    key, min_score = args.high_quality_by, args.high_quality_min_score
+    hq_label = (f"{key} >= {min_score:g}" if min_score is not None
+                else f"top {args.high_quality_fraction:.0%} by {key}")
+    high_quality_ids, thresholds = select_high_quality(scores, args.high_quality_fraction, key, min_score)
+    hq_table = selection_table(scores, high_quality_ids, key)
     all_high_quality_ids = {doc_id for ids in high_quality_ids.values() for doc_id in ids}
     write_importance_scores(args.output_dir / "importance_scores.csv", scores, all_high_quality_ids)
-    plot_importance_distribution(scores, args.output_dir / "importance_score_distribution.png", thresholds)
+    # the plot's cutoff marker is drawn on the avg5 panels, so only for the default top-fraction-by-avg5 subset
+    plot_importance_distribution(scores, args.output_dir / "importance_score_distribution.png",
+                                 thresholds if key == "avg5" and min_score is None else None)
     for label in ["edu", "avg4", "avg5"]:
         vals = [s[label] for s in scores if s[label] is not None]
         print(f"  {label}: n={len(vals)}, mean={statistics.mean(vals):.3f}", flush=True)
     for language, t in sorted(thresholds.items()):
-        print(f"  top {args.high_quality_fraction:.0%} avg5 cutoff [{language}]: {t:.3f} "
-              f"({len(high_quality_ids[language])} of {sum(1 for s in scores if s['language'] == language and s['avg5'] is not None)} documents)",
+        print(f"  {hq_label} cutoff [{language}]: {t:.3f} "
+              f"({len(high_quality_ids[language])} of {sum(1 for s in scores if s['language'] == language and s[key] is not None)} documents)",
               flush=True)
+    print("\n".join("  " + line for line in hq_table), flush=True)
     print(f"  wrote {args.output_dir / 'importance_scores.csv'} and importance_score_distribution.png", flush=True)
 
     if args.skip_full_eval:
@@ -318,16 +386,15 @@ def main():
                            "here.")
         print(f"Wrote {args.output_dir / 'gpt2_results.json'} and gpt2_summary.md")
 
-    print(f"\n=== step 2+3b: evaluate each GPT-2 checkpoint on the top {args.high_quality_fraction:.0%} "
-          f"by avg5 (per language) ===", flush=True)
+    print(f"\n=== step 2+3b: evaluate each GPT-2 checkpoint on the high-quality subset: {hq_label} "
+          f"(per language) ===", flush=True)
     hq_docs_by_language = load_documents_by_language(rows, high_quality_ids)
     hq_results_path = args.output_dir / "gpt2_results_highquality.json"
     hq_results = run_all(args.runs, args.runs_dir, hq_docs_by_language, languages, args.eval_batch_size, args.device,
                          use_bf16, hq_results_path, args.force)
     write_gpt2_summary(args.output_dir / "gpt2_summary_highquality.md", hq_results, languages,
-                       f"Macro loss/perplexity on only the top {args.high_quality_fraction:.0%} of documents per "
-                       f"language by avg5 (human-derived) -- the per-language avg5 cutoffs are marked on "
-                       f"importance_score_distribution.png.")
+                       f"Macro loss/perplexity on only the high-quality subset of each language: {hq_label} "
+                       f"(human-derived scores, 0-5). Selection per language:", hq_table)
     print(f"Wrote {args.output_dir / 'gpt2_results_highquality.json'} and gpt2_summary_highquality.md")
 
 

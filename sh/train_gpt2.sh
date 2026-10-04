@@ -66,6 +66,14 @@ source "${SLURM_SUBMIT_DIR:-.}/.env"
 # at a time -- see prepare_data.py --select-by tokens).
 # Run every method with the same SELECT_BY/NUM_DOCS-or-TARGET_TOKENS, EPOCHS_LIST and SEED so the
 # runs are comparable.
+# Other tokenizer (MODE=train and MODE=init): set TOKENIZER to a Hub ID or a local tokenizer folder, e.g. the
+# custom SEA BPE from sh/train_tokenizer.sh. Runs then go to checkpoints/gpt2_top_doc_<TOKENIZER_TAG>/
+# (default tag: the tokenizer folder name) instead of checkpoints/gpt2_top_doc/, from shared initial weights
+# for that vocab size. Training documents are unchanged: data/pilot_selected/$METHOD was sized with SeaLLM
+# token counts, so the same documents give a different number of tokens under another tokenizer.
+#   for M in random_20M edu_20M avg4_20M avg5_20M; do
+#     METHOD=$M TOKENIZER=checkpoints/tokenizers/sea_bpe_16k sbatch sh/train_gpt2.sh; done
+#   MODE=init TOKENIZER=checkpoints/tokenizers/sea_bpe_16k sbatch sh/train_gpt2.sh   # chance-level reference
 # If a training step hits CUDA out-of-memory, lower --micro-batch-size in the train_gpt2 call below
 # (8 by default; the effective batch stays 32 sequences).
 MODE="${MODE:-train}"
@@ -87,6 +95,16 @@ case "$MODE" in
   *) echo "Unknown MODE=$MODE (use train, score, score-all, combine, select, or init)" >&2; exit 1 ;;
 esac
 TRAIN_DATA="${TRAIN_DATA:-data/pilot_selected/${METHOD}/documents.csv}"
+
+TOKENIZER="${TOKENIZER:-}"
+if [ -n "$TOKENIZER" ]; then
+  TOKENIZER_TAG="${TOKENIZER_TAG:-$(basename "$TOKENIZER" | tr '[:upper:]' '[:lower:]')}"
+  RUN_ROOT="checkpoints/gpt2_top_doc_${TOKENIZER_TAG}"
+  TOKENIZER_ARGS=(--tokenizer "$TOKENIZER")
+else
+  RUN_ROOT="checkpoints/gpt2_top_doc"
+  TOKENIZER_ARGS=()
+fi
 
 if [ "$SELECT_BY" = "tokens" ] && [ -z "$TARGET_TOKENS" ]; then
   echo "ERROR: TARGET_TOKENS is required when SELECT_BY=tokens (e.g. TARGET_TOKENS=5000000)" >&2
@@ -119,7 +137,8 @@ ENVIRONMENT_NAME="sea-rater"   # own environment: other projects share "huhu" an
 # $SLURM_SUBMIT_DIR is the real submission dir; $0 points to SLURM's spool copy.
 cd "$SLURM_SUBMIT_DIR"
 echo "Working directory: $(pwd) | MODE=$MODE | METHOD=$METHOD | SELECT_BY=$SELECT_BY" \
-     "${TARGET_TOKENS:+TARGET_TOKENS=$TARGET_TOKENS }NUM_DOCS=$NUM_DOCS | EPOCHS_LIST=$EPOCHS_LIST | SEED=$SEED"
+     "${TARGET_TOKENS:+TARGET_TOKENS=$TARGET_TOKENS }NUM_DOCS=$NUM_DOCS | EPOCHS_LIST=$EPOCHS_LIST | SEED=$SEED" \
+     "| TOKENIZER=${TOKENIZER:-default (SeaLLM)} | RUN_ROOT=$RUN_ROOT"
 
 # Number of usable score files (language CSVs; thresholds.csv / dimension_correlations.csv are not
 # languages) in a folder. Pure-bash glob walk, not ls|grep|wc: with `set -o pipefail`, an empty/no-match
@@ -296,12 +315,14 @@ fi
 
 # --- MODE=init: evaluate the untrained initial weights, no selection or training --------------
 # Needs data/pilot_corpus/split_manifest.csv and data/pilot_corpus/<language>.csv for the held-out validation/test
-# texts, plus $TRAIN_DATA (only its language column is read). Writes to checkpoints/gpt2_top_doc/init_seed$SEED/.
+# texts, plus $TRAIN_DATA (only its language column is read). Writes to $RUN_ROOT/init_seed$SEED/.
 if [ "$MODE" = "init" ]; then
   echo "=== evaluate the untrained initial weights, seed $SEED ==="
   python -m src.train_gpt2_from_scratch.train_gpt2 \
     --eval-init-only \
     --train-data "$TRAIN_DATA" \
+    --output-dir "$RUN_ROOT/init_seed$SEED" \
+    "${TOKENIZER_ARGS[@]}" \
     --seed "$SEED" \
     --device cuda
 fi
@@ -316,6 +337,8 @@ if [ "$MODE" != "init" ]; then
       python -m src.train_gpt2_from_scratch.train_gpt2 \
         --method "$METHOD" \
         --train-data "$TRAIN_DATA" \
+        --output-dir "$RUN_ROOT/${METHOD}_ep${EPOCHS}_seed${SEED}" \
+        "${TOKENIZER_ARGS[@]}" \
         --epochs "$EPOCHS" \
         --seed "$SEED" \
         --evals-per-epoch 2 \
