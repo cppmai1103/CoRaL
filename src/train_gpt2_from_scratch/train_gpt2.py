@@ -137,13 +137,27 @@ def load_heldout_documents(pool_dir: Path, manifest: Path, split: str, limit: in
     return docs
 
 
-def encode_documents(tokenizer, texts: list[str], batch_size: int = 1000) -> list[list[int]]:
-    """Token ids of each document with one EOS appended (the document boundary)."""
+def encode_documents(tokenizer, texts: list[str], batch_size: int = 1000, bos: bool = False) -> list[list[int]]:
+    """Token ids of each document with one EOS appended (the document boundary), and with `bos` also the
+    tokenizer's BOS prepended (pretrained models such as Gemma, which start every document with <bos>)."""
+    start = [tokenizer.bos_token_id] if bos and tokenizer.bos_token_id is not None else []
     out = []
     for i in range(0, len(texts), batch_size):
         for ids in tokenizer(texts[i:i + batch_size], add_special_tokens=False)["input_ids"]:
-            out.append(ids + [tokenizer.eos_token_id])
+            out.append(start + ids + [tokenizer.eos_token_id])
     return out
+
+
+def eval_format(model, run_dir: Path | None = None) -> tuple[int, bool]:
+    """(block length, prepend BOS) to evaluate a run folder the way it was trained: GPT-2 pilot runs use their
+    n_positions and no BOS; LoRA continued-pretraining runs (continue_pretrain_lora.py) use the seq_len in their
+    config.json and BOS-prefixed documents."""
+    if getattr(model.config, "model_type", "gpt2") == "gpt2":
+        return model.config.n_positions, False
+    seq_len = 1024
+    if run_dir is not None and (run_dir / "config.json").is_file():
+        seq_len = json.loads((run_dir / "config.json").read_text(encoding="utf-8")).get("seq_len", seq_len)
+    return seq_len, True
 
 
 def pack_streams(encoded: dict[str, list[list[int]]], languages: list[str], seq_len: int, pad_id: int,

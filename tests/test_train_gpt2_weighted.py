@@ -82,7 +82,7 @@ class WeightedBlockLosses(unittest.TestCase):
         torch.manual_seed(0)
         config = GPT2Config(vocab_size=50, n_positions=8, n_embd=16, n_layer=1, n_head=2, bos_token_id=EOS,
                             eos_token_id=EOS, pad_token_id=PAD, tie_word_embeddings=True, use_cache=False)
-        model = GPT2LMHeadModel(config)
+        model = GPT2LMHeadModel(config).eval()  # no dropout: the two forward passes must match exactly
         ids = torch.randint(0, 50, (3, 8))
         mask = torch.ones(3, 8, dtype=torch.long)
         mask[1, -2:] = 0
@@ -99,7 +99,7 @@ class WeightedBlockLosses(unittest.TestCase):
         torch.manual_seed(0)
         config = GPT2Config(vocab_size=50, n_positions=8, n_embd=16, n_layer=1, n_head=2, bos_token_id=EOS,
                             eos_token_id=EOS, pad_token_id=PAD, tie_word_embeddings=True, use_cache=False)
-        model = GPT2LMHeadModel(config)
+        model = GPT2LMHeadModel(config).eval()  # no dropout: the two forward passes must match exactly
         ids = torch.randint(0, 50, (1, 8))
         mask = torch.ones(1, 8, dtype=torch.long)
         double_weight = torch.full((1, 8), 2.0)

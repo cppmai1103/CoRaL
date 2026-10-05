@@ -151,8 +151,9 @@ def main(argv=None):
         tokenizer = AutoTokenizer.from_pretrained(run_dir / "tokenizer")
         tokenizer.pad_token = tokenizer.eos_token  # as in training: the attention mask, not the id, marks padding
         model = AutoModelForCausalLM.from_pretrained(run_dir / "final").to(args.device).eval()
-        blocks = base.pack_streams({l: base.encode_documents(tokenizer, docs[l]) for l in languages}, languages,
-                                   model.config.n_positions, tokenizer.pad_token_id, run_seed(run_dir, args.seed))
+        seq_len, bos = base.eval_format(model, run_dir)  # GPT-2 runs: n_positions, no BOS; LoRA runs: seq_len + BOS
+        blocks = base.pack_streams({l: base.encode_documents(tokenizer, docs[l], bos=bos) for l in languages},
+                                   languages, seq_len, tokenizer.pad_token_id, run_seed(run_dir, args.seed))
         with torch.no_grad():
             result = base.evaluate(model, blocks, languages, args.batch_size, args.device, use_bf16,
                                    desc=f"{name} {args.split}")

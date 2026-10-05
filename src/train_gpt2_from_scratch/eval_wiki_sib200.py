@@ -38,6 +38,14 @@ summary.md (loss/PPL per language, per SIB-200 topic, and pooled; loss differenc
 --run-dir, treated as the random baseline). With several --run-dir values, also writes a
 side-by-side comparison table.
 
+Bits per byte (summed NLL / ln 2 / UTF-8 bytes of the scored text) is reported next to loss/PPL: loss and PPL
+are per TOKEN and only comparable between models with the same tokenizer; bits per byte compares any models.
+
+Pretrained Hub models (--model, e.g. google/gemma-3-270m) are scored the same way, except that the context
+starts with the model's own BOS token when it has one (Gemma is trained with <bos> first; our GPT-2 runs with
+EOS), and the window is capped at --max-context tokens. Results go to
+checkpoints/hub_models/<model name>/wiki_sib200_eval/. Gated models (Gemma) need HF_TOKEN.
+
 Run from the project root (GPU recommended; Wikipedia download is ~1.85GB total across the 6
 languages, cached under --cache-dir after the first run). Requires torch, transformers,
 huggingface_hub, pyarrow, pandas:
@@ -45,6 +53,8 @@ huggingface_hub, pyarrow, pandas:
     python -m src.train_gpt2_from_scratch.eval_wiki_sib200 --run-dir checkpoints/gpt2_top_doc/random_20M_ep1_seed42 \\
         checkpoints/gpt2_top_doc/edu_20M_ep1_seed42 checkpoints/gpt2_top_doc/avg4_20M_ep1_seed42 \\
         checkpoints/gpt2_top_doc/avg5_20M_ep1_seed42 --comparison-file checkpoints/gpt2_top_doc/wiki_sib200_comparison.md
+    python -m src.train_gpt2_from_scratch.eval_wiki_sib200 --run-dir checkpoints/gpt2_top_doc/random_20M_ep1_seed42 \
+        --model google/gemma-3-270m --comparison-file checkpoints/hub_models/wiki_sib200_comparison.md
 """
 
 import argparse
@@ -187,13 +197,13 @@ def _autocast(device, use_bf16):
 
 @torch.no_grad()
 def score_document(model, tokenizer, text: str, device, use_bf16: bool, seq_len: int, stride: int,
-                   max_chars: int) -> tuple[float, int]:
+                   max_chars: int, start_id: int | None = None) -> tuple[float, int]:
     """Summed negative log-likelihood and valid-target-token count for `text`, with one EOS
     prepended as context (matching training) and a sliding window over long content so nothing is
     truncated: each window after the first only scores the tokens beyond what the previous window
     already scored, using the rest purely as context (protocol section 4's "count each scored
     target token once; exclude overlap used only as context"). Returns (nll_sum, valid_tokens)."""
-    eos_id = tokenizer.eos_token_id
+    eos_id = tokenizer.eos_token_id if start_id is None else start_id
     content_ids = tokenizer(text[:max_chars], add_special_tokens=False)["input_ids"]
     ids = [eos_id] + content_ids
     total = len(ids)
@@ -241,40 +251,46 @@ def group_loss(records: list[dict]) -> dict:
     """L_G = sum(S_d) / sum(N_d); never average per-document perplexities (protocol section 4)."""
     s = sum(r["nll_sum"] for r in records)
     n = sum(r["valid_target_tokens"] for r in records)
+    n_bytes = sum(r.get("text_bytes", 0) for r in records)
     loss = s / n if n else float("nan")
     return {"n_documents": len(records), "valid_target_tokens": n, "loss": loss,
-           "perplexity": math.exp(loss) if n else float("nan")}
+           "perplexity": math.exp(loss) if n else float("nan"), "text_bytes": n_bytes,
+           "bits_per_byte": s / math.log(2) / n_bytes if n_bytes else float("nan")}
 
 
 def run_wikipedia(model, tokenizer, model_id: str, training_seed, languages: list[str], seed: int,
                   num_samples: int, pilot_corpus_dir: Path, min_chars: int, device, use_bf16: bool,
-                  seq_len: int, stride: int, max_chars: int, out_dir: Path) -> dict:
+                  seq_len: int, stride: int, max_chars: int, out_dir: Path, start_id: int | None = None) -> dict:
     per_language = {}
     for language in languages:
         examples = load_wikipedia(language, seed, num_samples, pilot_corpus_dir, min_chars)
         records = []
         for ex in progress(examples, desc=f"wikipedia/{language}", unit="doc"):
-            nll, n = score_document(model, tokenizer, ex["text"], device, use_bf16, seq_len, stride, max_chars)
-            records.append({**ex, "nll_sum": nll, "valid_target_tokens": n})
+            nll, n = score_document(model, tokenizer, ex["text"], device, use_bf16, seq_len, stride, max_chars,
+                                    start_id)
+            records.append({**ex, "nll_sum": nll, "valid_target_tokens": n,
+                            "text_bytes": len(ex["text"][:max_chars].encode("utf-8"))})
         write_predictions(out_dir / "wikipedia" / f"{language}.csv", model_id, training_seed, "wikimedia/wikipedia",
                           WIKIPEDIA_REVISION, records)
         per_language[language] = group_loss(records)
         g = per_language[language]
         print(f"  [wikipedia/{language}] articles={g['n_documents']} loss={g['loss']:.4f} "
-              f"perplexity={g['perplexity']:.1f}", flush=True)
+              f"perplexity={g['perplexity']:.1f} bits/byte={g['bits_per_byte']:.4f}", flush=True)
     macro = statistics.mean(v["loss"] for v in per_language.values()) if per_language else float("nan")
-    return {"dataset": "wikipedia", "per_language": per_language, "macro_loss": macro}
+    macro_bpb = statistics.mean(v["bits_per_byte"] for v in per_language.values()) if per_language else float("nan")
+    return {"dataset": "wikipedia", "per_language": per_language, "macro_loss": macro, "macro_bits_per_byte": macro_bpb}
 
 
 def run_sib200(model, tokenizer, model_id: str, training_seed, languages: list[str], device, use_bf16: bool,
-              seq_len: int, stride: int, out_dir: Path) -> dict:
+              seq_len: int, stride: int, out_dir: Path, start_id: int | None = None) -> dict:
     per_language = {}
     for language in languages:
         examples = load_sib200_text(language)
         records = []
         for ex in progress(examples, desc=f"sib200/{language}", unit="sent"):
-            nll, n = score_document(model, tokenizer, ex["text"], device, use_bf16, seq_len, stride, max_chars=10 ** 9)
-            records.append({**ex, "nll_sum": nll, "valid_target_tokens": n})
+            nll, n = score_document(model, tokenizer, ex["text"], device, use_bf16, seq_len, stride, max_chars=10 ** 9,
+                                    start_id=start_id)
+            records.append({**ex, "nll_sum": nll, "valid_target_tokens": n, "text_bytes": len(ex["text"].encode("utf-8"))})
         write_predictions(out_dir / "sib200" / f"{language}.csv", model_id, training_seed, "Davlan/sib200",
                           "main", records)
         by_topic = defaultdict(list)
@@ -284,9 +300,11 @@ def run_sib200(model, tokenizer, model_id: str, training_seed, languages: list[s
                                   "by_topic": {t: group_loss(rs) for t, rs in by_topic.items()}}
         g = per_language[language]["pooled"]
         print(f"  [sib200/{language}] sentences={g['n_documents']} loss={g['loss']:.4f} "
-              f"perplexity={g['perplexity']:.1f}", flush=True)
+              f"perplexity={g['perplexity']:.1f} bits/byte={g['bits_per_byte']:.4f}", flush=True)
     macro = statistics.mean(v["pooled"]["loss"] for v in per_language.values()) if per_language else float("nan")
-    return {"dataset": "sib200", "per_language": per_language, "macro_loss": macro}
+    macro_bpb = (statistics.mean(v["pooled"]["bits_per_byte"] for v in per_language.values()) if per_language
+                 else float("nan"))
+    return {"dataset": "sib200", "per_language": per_language, "macro_loss": macro, "macro_bits_per_byte": macro_bpb}
 
 
 def add_loss_diff(results: list[dict], baseline: list[dict] | None) -> None:
@@ -317,52 +335,62 @@ def write_summary(path: Path, results: list[dict]) -> None:
     for r in results:
         if r["dataset"] == "wikipedia":
             lines += ["## Wikipedia", "",
-                     "| Language | Articles | Valid target tokens | Loss | PPL | Loss vs. baseline |",
-                     "| --- | --- | --- | --- | --- | --- |"]
+                     "| Language | Articles | Valid target tokens | Loss | PPL | Bits/byte | Loss vs. baseline |",
+                     "| --- | --- | --- | --- | --- | --- | --- |"]
             for lang, v in r["per_language"].items():
                 diff = v.get("loss_diff_vs_random")
                 lines.append(f"| {lang} | {v['n_documents']} | {v['valid_target_tokens']:,} | {v['loss']:.4f} | "
-                            f"{v['perplexity']:.1f} | {'' if diff is None else f'{diff:+.4f}'} |")
+                            f"{v['perplexity']:.1f} | {v.get('bits_per_byte', float('nan')):.4f} | "
+                            f"{'' if diff is None else f'{diff:+.4f}'} |")
         else:
             lines += ["## SIB-200 (pooled per language)", "",
-                     "| Language | Sentences | Valid target tokens | Loss | PPL | Loss vs. baseline |",
-                     "| --- | --- | --- | --- | --- | --- |"]
+                     "| Language | Sentences | Valid target tokens | Loss | PPL | Bits/byte | Loss vs. baseline |",
+                     "| --- | --- | --- | --- | --- | --- | --- |"]
             for lang, v in r["per_language"].items():
                 p = v["pooled"]
                 diff = p.get("loss_diff_vs_random")
                 lines.append(f"| {lang} | {p['n_documents']} | {p['valid_target_tokens']:,} | {p['loss']:.4f} | "
-                            f"{p['perplexity']:.1f} | {'' if diff is None else f'{diff:+.4f}'} |")
+                            f"{p['perplexity']:.1f} | {p.get('bits_per_byte', float('nan')):.4f} | "
+                            f"{'' if diff is None else f'{diff:+.4f}'} |")
             lines += ["", "### SIB-200 by topic", "",
                      "| Language | Topic | Sentences | Loss | PPL |", "| --- | --- | --- | --- | --- |"]
             for lang, v in r["per_language"].items():
                 for topic, tv in sorted(v["by_topic"].items()):
                     lines.append(f"| {lang} | {topic} | {tv['n_documents']} | {tv['loss']:.4f} | {tv['perplexity']:.1f} |")
-        lines += [f"| **macro** | | | **{r['macro_loss']:.4f}** | | |", ""]
+        lines += [f"| **macro** | | | **{r['macro_loss']:.4f}** | | **{r.get('macro_bits_per_byte', float('nan')):.4f}** | |", ""]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_comparison(path: Path, run_names: list[str], all_results: dict[str, list[dict]]) -> None:
-    lines = ["# Wikipedia / SIB-200 evaluation: run comparison (loss)", "", f"Baseline: `{run_names[0]}`", ""]
+    lines = ["# Wikipedia / SIB-200 evaluation: run comparison", "", f"Baseline: `{run_names[0]}`", "",
+             "Loss and PPL are per token: compare them only between models with the same tokenizer. Bits per byte "
+             "(lower is better) compares any models, e.g. our GPT-2 runs against a pretrained model.", ""]
+    metrics = [("loss", "loss", "{:.4f}", "macro_loss"), ("perplexity", "PPL", "{:.1f}", None),
+               ("bits_per_byte", "bits per byte", "{:.4f}", "macro_bits_per_byte")]
     for dataset in ("wikipedia", "sib200"):
         if not any(any(x["dataset"] == dataset for x in all_results[name]) for name in run_names):
             continue
         languages = sorted({l for name in run_names for x in all_results[name] if x["dataset"] == dataset
                            for l in x["per_language"]})
-        lines += [f"## {dataset}", "", "| Run | " + " | ".join(languages) + " | macro |",
-                 "| --- |" + " --- |" * (len(languages) + 1)]
-        for name in run_names:
-            r = next((x for x in all_results[name] if x["dataset"] == dataset), None)
-            if r is None:
-                continue
-            cells = []
-            for l in languages:
-                v = r["per_language"].get(l)
-                if v is None:
-                    cells.append("N/A")
-                else:
-                    cells.append(f"{(v['pooled'] if dataset == 'sib200' else v)['loss']:.4f}")
-            lines.append(f"| {name} | " + " | ".join(cells) + f" | {r['macro_loss']:.4f} |")
-        lines.append("")
+        for key, label, fmt, macro_key in metrics:
+            lines += [f"## {dataset}: {label}", "", "| Run | " + " | ".join(languages) + " | macro |",
+                     "| --- |" + " --- |" * (len(languages) + 1)]
+            for name in run_names:
+                r = next((x for x in all_results[name] if x["dataset"] == dataset), None)
+                if r is None:
+                    continue
+                cells, values = [], []
+                for l in languages:
+                    v = r["per_language"].get(l)
+                    if v is None:
+                        cells.append("N/A")
+                    else:
+                        value = (v["pooled"] if dataset == "sib200" else v).get(key, float("nan"))
+                        values.append(value)
+                        cells.append(fmt.format(value))
+                macro = r.get(macro_key, float("nan")) if macro_key else math.exp(r["macro_loss"])
+                lines.append(f"| {name} | " + " | ".join(cells) + f" | {fmt.format(macro)} |")
+            lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -378,8 +406,11 @@ def training_seed_of(run_dir: Path) -> str:
 def main():
     global PROGRESS
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run-dir", type=Path, nargs="+", required=True,
-                        help="First one is treated as the random baseline for loss_diff")
+    parser.add_argument("--run-dir", type=Path, nargs="+", default=[],
+                        help="GPT-2 pilot run folders; the first entry (run dir, else model) is the baseline for loss_diff")
+    parser.add_argument("--model", nargs="+", default=[],
+                        help="Pretrained causal LMs: Hugging Face Hub IDs or local model folders, e.g. google/gemma-3-270m")
+    parser.add_argument("--max-context", type=int, default=2048, help="--model only: context window cap")
     parser.add_argument("--datasets", nargs="+", default=["wikipedia", "sib200"], choices=["wikipedia", "sib200"])
     parser.add_argument("--languages", nargs="+", default=None, help="Default: all 6 project languages")
     parser.add_argument("--num-samples", type=int, default=1000, help="Wikipedia articles per language")
@@ -400,28 +431,46 @@ def main():
 
     PROGRESS = not args.no_progress
     use_bf16 = not args.no_bf16
+    if not args.run_dir and not args.model:
+        parser.error("give at least one --run-dir or --model")
     languages = args.languages or list(WIKIPEDIA_LANGUAGES)
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    # (name, tokenizer source, model source, default output dir, training seed, is a pretrained Hub/local model)
+    entries = [(d.name, d / "tokenizer", d / "final", d / "wiki_sib200_eval", training_seed_of(d), False)
+               for d in args.run_dir]
+    for m in args.model:
+        local = Path(m)
+        if local.name == "final" and local.is_dir():  # a LoRA run's merged model: name and outputs follow the run
+            entries.append((local.parent.name, m, m, local.parent / "wiki_sib200_eval", training_seed_of(local.parent), True))
+        else:
+            short = m.rstrip("/").split("/")[-1]
+            entries.append((short, m, m, Path("checkpoints/hub_models") / short / "wiki_sib200_eval", "pretrained", True))
     all_results, baseline = {}, None
-    for i, run_dir in enumerate(args.run_dir):
-        name = run_dir.name
+    for i, (name, tok_src, model_src, default_out, training_seed, pretrained) in enumerate(entries):
         print(f"=== {name} ===", flush=True)
-        tokenizer = AutoTokenizer.from_pretrained(run_dir / "tokenizer")
-        model = AutoModelForCausalLM.from_pretrained(run_dir / "final").to(args.device).eval()
-        seq_len = model.config.n_positions
+        tokenizer = AutoTokenizer.from_pretrained(tok_src)
+        model = AutoModelForCausalLM.from_pretrained(model_src).to(args.device).eval()
+        if pretrained:
+            window = getattr(model.config, "max_position_embeddings", None) or getattr(model.config, "n_positions", None)
+            seq_len = min(window or args.max_context, args.max_context)
+            start_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+            print(f"  pretrained model: context {seq_len} tokens, start token {tokenizer.convert_ids_to_tokens(start_id)!r}, "
+                  f"vocab {len(tokenizer):,}", flush=True)
+        else:
+            seq_len, start_id = model.config.n_positions, None
         stride = args.stride or seq_len // 2
-        out_dir = args.out_dir or (run_dir / "wiki_sib200_eval")
+        out_dir = args.out_dir or default_out
 
         results = []
         if "wikipedia" in args.datasets:
-            results.append(run_wikipedia(model, tokenizer, name, training_seed_of(run_dir), languages, args.seed,
+            results.append(run_wikipedia(model, tokenizer, name, training_seed, languages, args.seed,
                                          args.num_samples, args.pilot_corpus_dir, args.min_chars, args.device,
-                                         use_bf16, seq_len, stride, args.max_article_chars, out_dir))
+                                         use_bf16, seq_len, stride, args.max_article_chars, out_dir, start_id))
         if "sib200" in args.datasets:
-            results.append(run_sib200(model, tokenizer, name, training_seed_of(run_dir), languages, args.device,
-                                      use_bf16, seq_len, stride, out_dir))
+            results.append(run_sib200(model, tokenizer, name, training_seed, languages, args.device,
+                                      use_bf16, seq_len, stride, out_dir, start_id))
         add_loss_diff(results, baseline)
         if i == 0:
             baseline = results
@@ -434,9 +483,11 @@ def main():
         if args.device != "cpu":
             torch.cuda.empty_cache()
 
-    if len(args.run_dir) > 1:
-        comparison_file = args.comparison_file or (args.run_dir[0].parent / "wiki_sib200_comparison.md")
-        write_comparison(comparison_file, [r.name for r in args.run_dir], all_results)
+    if len(entries) > 1:
+        comparison_file = args.comparison_file or (
+            entries[0][3].parent.parent / "wiki_sib200_comparison.md" if not entries[0][5]
+            else Path("checkpoints/hub_models/wiki_sib200_comparison.md"))
+        write_comparison(comparison_file, [e[0] for e in entries], all_results)
         print(f"Wrote {comparison_file}", flush=True)
 
 

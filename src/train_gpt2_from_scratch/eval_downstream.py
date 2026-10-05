@@ -31,12 +31,20 @@ example_id, language, prompt, choices, candidate_scores, prediction, gold_index,
 summary.json/summary.md (accuracy per language, macro average, chance/majority baselines). With
 several --run-dir values, also writes a side-by-side comparison table.
 
+Pretrained Hub models (--model, e.g. google/gemma-3-270m) are scored the same way, except that the context
+starts with the model's own BOS token when it has one (Gemma is trained with <bos> at the start of every
+sequence; our GPT-2 runs with EOS, see above), and the context window is capped at --max-context tokens.
+Results go to checkpoints/hub_models/<model name>/downstream_eval/. Gated models (Gemma) need HF_TOKEN.
+Hub models and run dirs can be mixed in one call; the comparison file lists them side by side.
+
 Run from the project root (GPU recommended; the GPT-2 checkpoints are small so CPU also works for
 a quick check). Requires torch, transformers, huggingface_hub, pyarrow (for XCOPA's parquet):
     python -m src.train_gpt2_from_scratch.eval_downstream --run-dir checkpoints/gpt2_top_doc/random_20M_ep1_seed42
     python -m src.train_gpt2_from_scratch.eval_downstream --run-dir checkpoints/gpt2_top_doc/random_20M_ep1_seed42 \\
         checkpoints/gpt2_top_doc/edu_20M_ep1_seed42 checkpoints/gpt2_top_doc/avg4_20M_ep1_seed42 \\
         checkpoints/gpt2_top_doc/avg5_20M_ep1_seed42 --comparison-file checkpoints/gpt2_top_doc/downstream_comparison.md
+    python -m src.train_gpt2_from_scratch.eval_downstream --model google/gemma-3-270m \
+        --run-dir checkpoints/gpt2_top_doc/random_20M_ep1_seed42 --comparison-file checkpoints/hub_models/downstream_comparison.md
 """
 
 import argparse
@@ -159,10 +167,10 @@ def common_prefix_len(a: list[int], b: list[int]) -> int:
 
 @torch.no_grad()
 def loglikelihood(model, tokenizer, prompt: str, candidate: str, device, use_bf16: bool,
-                  seq_len: int) -> tuple[float, bool]:
-    """Summed log-probability of `candidate` as a continuation of `prompt` (one EOS prepended,
-    matching training). Returns (score, truncated)."""
-    eos_id = tokenizer.eos_token_id
+                  seq_len: int, start_id: int | None = None) -> tuple[float, bool]:
+    """Summed log-probability of `candidate` as a continuation of `prompt`, with one start token prepended:
+    `start_id`, or EOS by default (matching how the GPT-2 runs were trained). Returns (score, truncated)."""
+    eos_id = tokenizer.eos_token_id if start_id is None else start_id
     prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     full_ids = tokenizer(prompt + " " + candidate, add_special_tokens=False)["input_ids"]
     prefix = common_prefix_len(prompt_ids, full_ids)
@@ -198,13 +206,14 @@ def _autocast(device, use_bf16):
 
 
 def evaluate_examples(model, tokenizer, examples: list[dict], device, use_bf16: bool, seq_len: int,
-                      desc: str) -> list[dict]:
+                      desc: str, start_id: int | None = None) -> list[dict]:
     records = []
     truncated_count = 0
     for ex in progress(examples, desc=desc, unit="ex"):
         scores = []
         for choice in ex["choices"]:
-            score, truncated = loglikelihood(model, tokenizer, ex["prompt"], choice, device, use_bf16, seq_len)
+            score, truncated = loglikelihood(model, tokenizer, ex["prompt"], choice, device, use_bf16, seq_len,
+                                             start_id)
             scores.append(score)
             truncated_count += truncated
         prediction = max(range(len(scores)), key=lambda j: scores[j])
@@ -246,7 +255,7 @@ def majority_baseline(examples: list[dict]) -> float:
 
 
 def run_benchmark(model, tokenizer, benchmark: str, languages: list[str], seed: int, num_samples: int,
-                  device, use_bf16: bool, seq_len: int, out_dir: Path) -> dict:
+                  device, use_bf16: bool, seq_len: int, out_dir: Path, start_id: int | None = None) -> dict:
     spec = BENCHMARKS[benchmark]
     per_language = {}
     for language in languages:
@@ -254,7 +263,7 @@ def run_benchmark(model, tokenizer, benchmark: str, languages: list[str], seed: 
             continue
         examples = spec["loader"](language, seed, num_samples)
         records = evaluate_examples(model, tokenizer, examples, device, use_bf16, seq_len,
-                                    desc=f"{benchmark}/{language}")
+                                    desc=f"{benchmark}/{language}", start_id=start_id)
         write_predictions(out_dir / benchmark / f"{language}.csv", examples, records)
         per_language[language] = {"n": len(records), "accuracy": accuracy(records),
                                   "majority_baseline": majority_baseline(examples)}
@@ -298,10 +307,20 @@ def write_comparison(path: Path, run_names: list[str], all_results: dict[str, li
 # Main
 # --------------------------------------------------------------------------
 
+def default_out_root(entries) -> Path:
+    """Where the comparison table goes by default: next to the first run dir, or checkpoints/hub_models."""
+    return entries[0][3].parent.parent if not entries[0][4] else Path("checkpoints/hub_models")
+
+
 def main():
     global PROGRESS
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run-dir", type=Path, nargs="+", required=True)
+    parser.add_argument("--run-dir", type=Path, nargs="+", default=[],
+                        help="GPT-2 pilot run folders (final/ + tokenizer/)")
+    parser.add_argument("--model", nargs="+", default=[],
+                        help="Pretrained causal LMs: Hugging Face Hub IDs or local model folders, e.g. google/gemma-3-270m")
+    parser.add_argument("--max-context", type=int, default=2048,
+                        help="--model only: context window cap (prompt is truncated from the start beyond it)")
     parser.add_argument("--benchmarks", nargs="+", default=list(BENCHMARKS), choices=list(BENCHMARKS))
     parser.add_argument("--languages", nargs="+", default=None,
                         help="Default: every language available for each benchmark")
@@ -316,22 +335,39 @@ def main():
 
     PROGRESS = not args.no_progress
     use_bf16 = not args.no_bf16
+    if not args.run_dir and not args.model:
+        parser.error("give at least one --run-dir or --model")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    # (name, tokenizer source, model source, default output dir, is a pretrained Hub/local model)
+    entries = [(d.name, d / "tokenizer", d / "final", d / "downstream_eval", False) for d in args.run_dir]
+    for m in args.model:
+        local = Path(m)
+        if local.name == "final" and local.is_dir():  # a LoRA run's merged model: name and outputs follow the run
+            entries.append((local.parent.name, m, m, local.parent / "downstream_eval", True))
+        else:
+            entries.append((m.rstrip("/").split("/")[-1], m, m,
+                            Path("checkpoints/hub_models") / m.rstrip("/").split("/")[-1] / "downstream_eval", True))
     all_results = {}
-    for run_dir in args.run_dir:
-        name = run_dir.name
+    for name, tok_src, model_src, default_out, pretrained in entries:
         print(f"=== {name} ===", flush=True)
-        tokenizer = AutoTokenizer.from_pretrained(run_dir / "tokenizer")
-        model = AutoModelForCausalLM.from_pretrained(run_dir / "final").to(args.device).eval()
-        seq_len = model.config.n_positions
-        out_dir = args.out_dir or (run_dir / "downstream_eval")
+        tokenizer = AutoTokenizer.from_pretrained(tok_src)
+        model = AutoModelForCausalLM.from_pretrained(model_src).to(args.device).eval()
+        if pretrained:
+            window = getattr(model.config, "max_position_embeddings", None) or getattr(model.config, "n_positions", None)
+            seq_len = min(window or args.max_context, args.max_context)
+            start_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+            print(f"  pretrained model: context {seq_len} tokens, start token {tokenizer.convert_ids_to_tokens(start_id)!r}, "
+                  f"vocab {len(tokenizer):,}, {sum(p.numel() for p in model.parameters()) / 1e6:.0f}M parameters", flush=True)
+        else:
+            seq_len, start_id = model.config.n_positions, None
+        out_dir = args.out_dir or default_out
         results = []
         for benchmark in args.benchmarks:
             languages = args.languages or list(BENCHMARKS[benchmark]["languages"])
             results.append(run_benchmark(model, tokenizer, benchmark, languages, args.seed, args.num_samples,
-                                         args.device, use_bf16, seq_len, out_dir))
+                                         args.device, use_bf16, seq_len, out_dir, start_id))
         (out_dir / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
         write_summary(out_dir / "summary.md", results)
         print(f"Wrote {out_dir / 'results.json'} and summary.md", flush=True)
@@ -340,9 +376,9 @@ def main():
         if args.device != "cpu":
             torch.cuda.empty_cache()
 
-    if len(args.run_dir) > 1:
-        comparison_file = args.comparison_file or (args.run_dir[0].parent / "downstream_comparison.md")
-        write_comparison(comparison_file, [r.name for r in args.run_dir], all_results)
+    if len(entries) > 1:
+        comparison_file = args.comparison_file or (default_out_root(entries) / "downstream_comparison.md")
+        write_comparison(comparison_file, [e[0] for e in entries], all_results)
         print(f"Wrote {comparison_file}", flush=True)
 
 

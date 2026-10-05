@@ -229,10 +229,10 @@ def evaluate_run(run_dir: Path, docs_by_language: dict[str, list[str]], language
 
     tokenizer = AutoTokenizer.from_pretrained(run_dir / "tokenizer")
     model = AutoModelForCausalLM.from_pretrained(run_dir / "final").to(device).eval()
-    seq_len = model.config.n_positions
+    seq_len, bos = gpt.eval_format(model, run_dir)  # GPT-2 runs: n_positions, no BOS; LoRA runs: their seq_len + BOS
     pad_id = tokenizer.pad_token_id
 
-    encoded = {lang: gpt.encode_documents(tokenizer, texts) for lang, texts in docs_by_language.items()}
+    encoded = {lang: gpt.encode_documents(tokenizer, texts, bos=bos) for lang, texts in docs_by_language.items()}
     blocks = gpt.pack_streams(encoded, languages, seq_len, pad_id, seed=0)
     result = gpt.evaluate(model, blocks, languages, batch_size, device, use_bf16,
                           desc=f"{run_dir.name} on human-annotated data")

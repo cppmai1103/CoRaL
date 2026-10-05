@@ -1,3 +1,4 @@
+import math
 import unittest
 from pathlib import Path
 
@@ -48,6 +49,11 @@ class GroupLoss(unittest.TestCase):
         self.assertAlmostEqual(g["loss"], 20.0 / 100)
         naive_average_of_per_doc_losses = (5.0 + 10.0 / 98) / 2
         self.assertNotAlmostEqual(g["loss"], naive_average_of_per_doc_losses)
+
+    def test_bits_per_byte_is_total_nats_over_bytes(self):
+        records = [{"nll_sum": 2 * math.log(2), "valid_target_tokens": 1, "text_bytes": 1},
+                   {"nll_sum": 6 * math.log(2), "valid_target_tokens": 3, "text_bytes": 3}]
+        self.assertAlmostEqual(ews.group_loss(records)["bits_per_byte"], 8 / 4)
 
     def test_empty_is_nan(self):
         g = ews.group_loss([])
