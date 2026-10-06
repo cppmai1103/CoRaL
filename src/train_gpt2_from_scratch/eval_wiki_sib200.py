@@ -398,6 +398,21 @@ def write_comparison(path: Path, run_names: list[str], all_results: dict[str, li
 # Main
 # --------------------------------------------------------------------------
 
+
+def unique_names(entries: list[tuple]) -> list[tuple]:
+    """Entries whose display names collide (e.g. the GPT-2 random_20M run and a LoRA random_20M run, or several
+    merged models all called 'final') get the folder above prefixed, so comparison tables keep every row."""
+    names = [e[0] for e in entries]
+    out = []
+    for e in entries:
+        name = e[0]
+        if names.count(name) > 1:
+            src = Path(str(e[2]))
+            run = src.parent if src.name == "final" else src
+            name = f"{run.parent.name}/{run.name}"
+        out.append((name,) + tuple(e[1:]))
+    return out
+
 def training_seed_of(run_dir: Path) -> str:
     m = re.search(r"seed(\d+)$", run_dir.name)
     return m.group(1) if m else "unknown"
@@ -442,11 +457,12 @@ def main():
                for d in args.run_dir]
     for m in args.model:
         local = Path(m)
-        if local.name == "final" and local.is_dir():  # a LoRA run's merged model: name and outputs follow the run
+        if local.name == "final":  # a LoRA run's merged model: name and outputs follow the run
             entries.append((local.parent.name, m, m, local.parent / "wiki_sib200_eval", training_seed_of(local.parent), True))
         else:
             short = m.rstrip("/").split("/")[-1]
             entries.append((short, m, m, Path("checkpoints/hub_models") / short / "wiki_sib200_eval", "pretrained", True))
+    entries = unique_names(entries)
     all_results, baseline = {}, None
     for i, (name, tok_src, model_src, default_out, training_seed, pretrained) in enumerate(entries):
         print(f"=== {name} ===", flush=True)

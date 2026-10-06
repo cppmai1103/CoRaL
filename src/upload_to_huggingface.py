@@ -43,8 +43,32 @@ SOURCE_FILES = [
 # Pilot/checkpoint directories that may not exist in every local checkout or test fixture --
 # copied if present, skipped with a printed note otherwise (never a hard error).
 OPTIONAL_DATA_DIRS = [("pilot_corpus", "pilot_corpus_dir"), ("pilot_scores", "pilot_scores_dir"),
-                      ("pilot_selected", "pilot_selected_dir")]
-OPTIONAL_MODEL_DIRS = [("rater/finetuned", "finetuned_dir"), ("gpt2_top_doc", "gpt2_dir")]
+                      ("pilot_selected", "pilot_selected_dir"), ("llm_score", "llm_score_dir"),
+                      ("rater_dataset_llm", "rater_dataset_llm_dir"), ("pilot_scores_llm", "pilot_scores_llm_dir")]
+OPTIONAL_MODEL_DIRS = [("rater/finetuned", "finetuned_dir"), ("gpt2_top_doc", "gpt2_dir"),
+                       ("rater_llm", "rater_llm_dir"), ("gpt2_weighted_loss", "weighted_dir"),
+                       ("gpt2_top_doc_sea_bpe_16k", "gpt2_16k_dir"), ("tokenizers", "tokenizers_dir"),
+                       ("lora_cpt", "lora_cpt_dir"), ("hub_models", "hub_models_dir")]
+# One line per optional folder for the generated cards (folders not present are not mentioned).
+EXTRA_DATA_DESCRIPTIONS = {
+    "llm_score": "LLM (Gemini) scores of ~5,000 documents per language on the 5 dimensions, with justifications.",
+    "rater_dataset_llm": "the rater dataset relabelled with LLM scores: same human-annotated documents and "
+                         "per-dimension splits, train/validation labels = LLM score, test = human mean.",
+    "pilot_scores_llm": "scores of the GPT-2 candidate pool from the LLM-label raters (per dimension, avg4, avg5); "
+                        "the selections they produce are pilot_selected/llm_{edu,avg4,avg5}_20M.",
+}
+EXTRA_MODEL_DESCRIPTIONS = {
+    "rater_llm": "mmBERT raters fine-tuned on LLM-score labels (same documents/splits as the human-label raters), "
+                 "with rater_comparison.md: both kinds of rater on the human test split.",
+    "gpt2_weighted_loss": "GPT-2 runs trained on the random 20M documents with a rater-score-weighted loss "
+                          "(edu, avg4, avg5) instead of document selection.",
+    "gpt2_top_doc_sea_bpe_16k": "the 20M GPT-2 runs (random, edu, avg4, avg5) with the custom 16K SEA tokenizer "
+                                "(tokenizer ablation; compare with the SeaLLM runs by bits per byte only).",
+    "tokenizers": "the custom byte-level BPE tokenizer(s) trained on the pilot corpus train split, with reports.",
+    "lora_cpt": "google/gemma-3-270m continued-pretrained with LoRA on the 20M selections (adapter/ and the merged "
+                "model final/), plus the untrained base reference; Gemma license applies to these weights.",
+    "hub_models": "evaluation results of pretrained Hub models (e.g. gemma-3-270m) on the same benchmarks.",
+}
 
 
 def repo_id(value):
@@ -74,6 +98,15 @@ def parse_args(argv=None):
                         help="Fully fine-tuned raters; skipped with a note if missing")
     parser.add_argument("--gpt2-dir", type=Path, default=ROOT / "checkpoints/gpt2_top_doc",
                         help="Trained GPT-2 pilot checkpoints; skipped with a note if missing")
+    parser.add_argument("--llm-score-dir", type=Path, default=ROOT / "data/llm_score", help="LLM scores; skipped with a note if missing")
+    parser.add_argument("--rater-dataset-llm-dir", type=Path, default=ROOT / "data/rater_dataset_llm", help="LLM-label rater dataset; skipped with a note if missing")
+    parser.add_argument("--pilot-scores-llm-dir", type=Path, default=ROOT / "data/pilot_scores_llm", help="Pool scores from the LLM-label raters; skipped with a note if missing")
+    parser.add_argument("--rater-llm-dir", type=Path, default=ROOT / "checkpoints/rater_llm", help="LLM-label raters; skipped with a note if missing")
+    parser.add_argument("--weighted-dir", type=Path, default=ROOT / "checkpoints/gpt2_weighted_loss", help="Weighted-loss GPT-2 runs; skipped with a note if missing")
+    parser.add_argument("--gpt2-16k-dir", type=Path, default=ROOT / "checkpoints/gpt2_top_doc_sea_bpe_16k", help="16K-tokenizer GPT-2 runs; skipped with a note if missing")
+    parser.add_argument("--tokenizers-dir", type=Path, default=ROOT / "checkpoints/tokenizers", help="Custom tokenizers; skipped with a note if missing")
+    parser.add_argument("--lora-cpt-dir", type=Path, default=ROOT / "checkpoints/lora_cpt", help="Gemma LoRA continued-pretraining runs; skipped with a note if missing")
+    parser.add_argument("--hub-models-dir", type=Path, default=ROOT / "checkpoints/hub_models", help="Hub-model evaluation results; skipped with a note if missing")
     parser.add_argument("--staging-dir", type=Path, default=ROOT / ".scratch/hf_upload")
     parser.add_argument("--include-embeddings", action="store_true",
                         help="Also upload data/rater_dataset/embeddings*/embeddings.pt to the dataset repo")
@@ -142,6 +175,11 @@ def prepare_dataset(args, destination):
         if args.include_embeddings:
             copy_file(path.with_name("embeddings.pt"), prepared / path.relative_to(args.prepared_dir).with_name("embeddings.pt"))
     n, languages, counts = validate_prepared(prepared)
+    # LLM-vs-human comparison and the GPT-2 evaluations on the annotated documents, if present
+    for path in sorted(args.prepared_dir.glob("llm_scores_annotated.*")):
+        copy_file(path, prepared / path.name)
+    for path in sorted(p for p in args.prepared_dir.glob("annotated_eval*") if p.is_dir()):
+        copy_artifacts(path, prepared / path.name, DATA_SUFFIXES)
 
     pilot_included = []
     for name, attr in OPTIONAL_DATA_DIRS:
@@ -178,6 +216,11 @@ def prepare_dataset(args, destination):
             card.append("- `pilot_selected/` — the actual GPT-2 training sets, one folder per selection "
                         "method x token budget (`documents.csv`, `summary.json`/`summary.md`).")
         card.append("")
+    extra = [name for name in EXTRA_DATA_DESCRIPTIONS if name in pilot_included]
+    if extra:
+        card += ["## LLM-label experiment", ""] + [f"- `{name}/` — {EXTRA_DATA_DESCRIPTIONS[name]}" for name in extra]
+        card += ["- `rater_dataset/llm_scores_annotated.*` and `rater_dataset/annotated_eval*/` — LLM vs human scores "
+                 "on the annotated documents, and GPT-2 runs evaluated on them.", ""]
     card += [f"Model checkpoints and results: https://huggingface.co/{args.model_repo}", "",
              "## License", "", "This export does not assign a new license to the underlying source documents or annotations."]
     # Preserve a supplied dataset card when replacing it with an export card.
@@ -273,6 +316,9 @@ def prepare_model(args, destination):
                  'folder = root / "gpt2_top_doc/random_5M_ep1_seed42"',
                  'tokenizer = AutoTokenizer.from_pretrained(folder / "tokenizer")',
                  'model = AutoModelForCausalLM.from_pretrained(folder / "final").eval()', "```", ""]
+    extra = [name for name in EXTRA_MODEL_DESCRIPTIONS if name in other_included]
+    if extra:
+        card += ["## Further experiments", ""] + [f"- `{name}/` — {EXTRA_MODEL_DESCRIPTIONS[name]}" for name in extra] + [""]
     card += ["## Evaluation and limitations", "",
              "Predictions and reports describe held-out human annotations. Rare score ranges have small test samples and can have substantially higher errors than overall averages. Inspect language/range results before selection. No downstream language-model benefit is established by rater agreement alone.", "",
              "In the current evaluation_report.md summary tables, the legacy column labelled 'Baseline MAE (mean/median)' contains training baseline score values. Actual median-baseline errors are in the by-range table/CSV. Do not interpret that legacy column as baseline errors.", "",

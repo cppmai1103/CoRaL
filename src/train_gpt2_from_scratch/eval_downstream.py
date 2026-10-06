@@ -307,6 +307,21 @@ def write_comparison(path: Path, run_names: list[str], all_results: dict[str, li
 # Main
 # --------------------------------------------------------------------------
 
+
+def unique_names(entries: list[tuple]) -> list[tuple]:
+    """Entries whose display names collide (e.g. the GPT-2 random_20M run and a LoRA random_20M run, or several
+    merged models all called 'final') get the folder above prefixed, so comparison tables keep every row."""
+    names = [e[0] for e in entries]
+    out = []
+    for e in entries:
+        name = e[0]
+        if names.count(name) > 1:
+            src = Path(str(e[2]))
+            run = src.parent if src.name == "final" else src
+            name = f"{run.parent.name}/{run.name}"
+        out.append((name,) + tuple(e[1:]))
+    return out
+
 def default_out_root(entries) -> Path:
     """Where the comparison table goes by default: next to the first run dir, or checkpoints/hub_models."""
     return entries[0][3].parent.parent if not entries[0][4] else Path("checkpoints/hub_models")
@@ -344,11 +359,12 @@ def main():
     entries = [(d.name, d / "tokenizer", d / "final", d / "downstream_eval", False) for d in args.run_dir]
     for m in args.model:
         local = Path(m)
-        if local.name == "final" and local.is_dir():  # a LoRA run's merged model: name and outputs follow the run
+        if local.name == "final":  # a LoRA run's merged model: name and outputs follow the run
             entries.append((local.parent.name, m, m, local.parent / "downstream_eval", True))
         else:
             entries.append((m.rstrip("/").split("/")[-1], m, m,
                             Path("checkpoints/hub_models") / m.rstrip("/").split("/")[-1] / "downstream_eval", True))
+    entries = unique_names(entries)
     all_results = {}
     for name, tok_src, model_src, default_out, pretrained in entries:
         print(f"=== {name} ===", flush=True)
