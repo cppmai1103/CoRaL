@@ -37,6 +37,8 @@ OUT_PREFIX="${OUT_PREFIX-llm_}"         # output: data/pilot_selected/<OUT_PREFI
 OUT_SUFFIX="${OUT_SUFFIX:-}"
 SELECT_RANDOM="${SELECT_RANDOM:-0}"     # 1: also select random_<BUDGET><OUT_SUFFIX> from POOL_DIR (seed 42)
 COMPARE_RATERS="${COMPARE_RATERS:-1}"   # 1: LLM-label vs human-label rater comparison (step 1)
+ROUND_ROBIN="${ROUND_ROBIN:-0}"         # 1: also rr<PER_DIMENSION>: per batch the next PER_DIMENSION top documents of
+PER_DIMENSION="${PER_DIMENSION:-5}"     #    each dimension (edu, prof, reas, clean, cult), duplicates dropped
 RANDOM_DIR="data/pilot_selected/random_${BUDGET}${OUT_SUFFIX}"
 DIMS4="educational_value reasoning professionalism cleanliness"
 DIMS5="$DIMS4 cultural_nuances"
@@ -98,4 +100,16 @@ for PAIR in edu:educational_value_mean avg4:avg4_mean avg5:avg5_mean; do
     --compare-with "$RANDOM_DIR/summary.json"
 done
 
+if [ "$ROUND_ROBIN" = 1 ]; then
+  RR_OUT="data/pilot_selected/${OUT_PREFIX}rr${PER_DIMENSION}_${BUDGET}${OUT_SUFFIX}"
+  echo "=== 3b. round-robin over the 5 dimensions, $PER_DIMENSION per dimension per batch -> $RR_OUT ==="
+  RR_DIRS=""; for D in educational_value professionalism reasoning cleanliness cultural_nuances; do RR_DIRS="$RR_DIRS $SCORES_ROOT/${D}_mean"; done
+  python -m src.train_gpt2_from_scratch.prepare_data \
+    --method round-robin \
+    --pool-dir "$POOL_DIR" \
+    --scores-dirs $RR_DIRS \
+    --per-dimension "$PER_DIMENSION" \
+    --output-dir "$RR_OUT" \
+    --select-by tokens --target-tokens "$TARGET_TOKENS"
+fi
 echo "Done: $SCORES_ROOT/{avg4,avg5}_mean, data/pilot_selected/${OUT_PREFIX}{edu,avg4,avg5}_${BUDGET}${OUT_SUFFIX}"

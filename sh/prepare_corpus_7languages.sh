@@ -27,7 +27,7 @@ set -eo pipefail
 #
 # Run all of it with: bash sh/submit_7languages_pipeline.sh (one extract job per language, then split)
 
-STEP="${STEP:?set STEP=extract or STEP=split}"
+STEP="${STEP:?set STEP=extract, truncate or split}"
 LANGUAGE="${LANGUAGE:-}"
 TARGET="${TARGET:-300000}"
 SRC=data/pilot_corpus
@@ -58,6 +58,13 @@ if [ "$STEP" = "extract" ]; then
   mv "$DST/extraction_report.md" "$DST/extraction_report_$LANGUAGE.md"
   echo "Done: $DST/$LANGUAGE.csv"
 
+elif [ "$STEP" = "truncate" ]; then
+  # Cut languages extracted with a larger target to their first TARGET documents (random order, so still random).
+  for L in ${LANGUAGE:-$LANGUAGES}; do
+    python -m src.train_gpt2_from_scratch.extract_corpus --truncate --languages "$L" \
+      --target-per-language "$TARGET" --output-dir "$DST"
+  done
+
 elif [ "$STEP" = "split" ]; then
   echo "=== extraction report for all languages (every language already extracted, so nothing is streamed) ==="
   for L in $LANGUAGES; do
@@ -75,5 +82,5 @@ EOF
   python -m src.train_gpt2_from_scratch.split_corpus --corpus-dir "$DST"
   echo "Done: $DST/{split_manifest.csv,split_report.md,extraction_report.md}"
 else
-  echo "Unknown STEP=$STEP (extract or split)" >&2; exit 1
+  echo "Unknown STEP=$STEP (extract, truncate or split)" >&2; exit 1
 fi

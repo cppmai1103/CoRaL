@@ -12,9 +12,10 @@
 #                   document (no split needed), ~5.5h each for 7 x 300K (after extract, and after RATER_JOB if the
 #                   raters are still training)
 #                                                    -> data/pilot_scores_7languages/<dim>_mean/
-#   select  1 job   sh/select_llm.sh, after score + split: avg4/avg5 + random/edu/avg4/avg5 selections of
-#                   TARGET_TOKENS (50M) per language from the train split
-#                                                    -> data/pilot_selected/{random,edu,avg4,avg5}_<BUDGET>_7languages/
+#   select  1 job   sh/select_llm.sh, after score + split: avg4/avg5 + random/edu/avg4/avg5/rr5 selections of
+#                   TARGET_TOKENS (50M) per language from the train split (rr5: per batch the next 5 top documents
+#                   of each of the 5 dimensions, duplicates dropped)
+#                                                    -> data/pilot_selected/{random,edu,avg4,avg5,rr5}_<BUDGET>_7languages/
 #
 # Run from the project root:  RATER_JOB=22011 bash sh/submit_7languages_pipeline.sh
 # Extraction only:            STAGES="extract" bash sh/submit_7languages_pipeline.sh
@@ -65,8 +66,8 @@ fi
 
 if has select; then
   JOB=$(SCORES_ROOT=$SCORES_ROOT POOL_DIR=$POOL_DIR N_LANGUAGES=7 OUT_PREFIX="" OUT_SUFFIX=_7languages \
-        SELECT_RANDOM=1 COMPARE_RATERS=0 TARGET_TOKENS=$TARGET_TOKENS BUDGET=$BUDGET \
+        SELECT_RANDOM=1 COMPARE_RATERS=0 ROUND_ROBIN=1 TARGET_TOKENS=$TARGET_TOKENS BUDGET=$BUDGET \
         sbatch --parsable $(dep $SCORE_JOBS $SPLIT_JOB) --time=4:00:00 --job-name=select-7l sh/select_llm.sh)
-  echo "select : job $JOB -> data/pilot_selected/{random,edu,avg4,avg5}_${BUDGET}_7languages"
+  echo "select : job $JOB -> data/pilot_selected/{random,edu,avg4,avg5,rr5}_${BUDGET}_7languages"
 fi
 echo "Check progress: squeue -u $USER"

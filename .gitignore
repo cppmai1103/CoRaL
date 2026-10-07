@@ -1,10 +1,12 @@
 .scratch/
 .venv/
 __pycache__/
-# cppmai/sea-rater-data
 data/
-# cppmai/sea-rater-models
+# cppmai/sea-rater-data
+data6languages/
 checkpoints/
+# cppmai/sea-rater-models
+checkpoints6languages/
 *.out
 *.err
 .env

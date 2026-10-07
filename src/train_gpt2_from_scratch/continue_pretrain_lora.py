@@ -27,14 +27,26 @@ model, never with the GPT-2 runs (SeaLLM tokenizer); eval_test_set.py also repor
 
 Gemma is gated: set HF_TOKEN (sh/lora_cpt.sh reads it from .env).
 
+--budget B (e.g. 10M, SeaLLM tokens with EOS per language, as prepare_data.py counts them) trains on the B part of a
+larger selection instead of the whole file: selections made with prepare_data.py --select-by tokens are nested, so
+the B selection is the start of the larger one, up to the first group of --group-size documents (or round-robin
+batch) after which the running token count reaches B -- exactly the documents prepare_data.py would have selected
+for B. Training is then the same as for any selection (all documents shuffled together, cosine schedule), so one
+selection at the largest budget serves every budget, each trained as its own run.
+
 Run from the project root (GPU):
     python -m src.train_gpt2_from_scratch.continue_pretrain_lora --eval-base-only
     python -m src.train_gpt2_from_scratch.continue_pretrain_lora --method avg4_20M
+    python -m src.train_gpt2_from_scratch.continue_pretrain_lora --method avg5_50M_7languages --budget 10M \\
+        --pool-dir data/pilot_corpus_7languages
 """
 
 import argparse
+import csv
 import json
+import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -64,6 +76,47 @@ def load_model(args, device):
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()
     return model.to(device)
+
+
+def parse_budget(text: str) -> int:
+    t = text.strip().upper()
+    scale = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(t[-1:], 1)
+    return int(float(t[:-1] if scale > 1 else t) * scale)
+
+
+def budget_label(tokens: int) -> str:
+    return f"{tokens // 1_000_000}M" if tokens % 1_000_000 == 0 else str(tokens)
+
+
+def load_budget_documents(path: Path, budget: int, group_size: int, limit: int = 0) -> tuple[dict[str, list[str]], dict]:
+    """The `budget` part of a selection made with prepare_data.py --select-by tokens (documents.csv, in selection
+    order, with tokens_with_eos): per language, the documents up to the first group of `group_size` documents (or
+    round-robin batch, when the file has a `round` column) after which the running token count reaches `budget`."""
+    csv.field_size_limit(sys.maxsize)
+    by_lang: dict[str, list[tuple[str, int, str | None]]] = defaultdict(list)
+    with path.open(encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        if "tokens_with_eos" not in reader.fieldnames:
+            raise SystemExit(f"{path} has no tokens_with_eos column: make it with prepare_data.py --select-by tokens")
+        has_round = "round" in reader.fieldnames
+        for row in reader:
+            by_lang[row["language"]].append((row["text"], int(row["tokens_with_eos"]), row["round"] if has_round else None))
+    docs, info = {}, {}
+    for language, rows in by_lang.items():
+        cum, end = 0, None
+        for i, (_, n, rnd) in enumerate(rows):
+            cum += n
+            last = i + 1 == len(rows)
+            group_end = last or (rows[i + 1][2] != rnd if has_round else (i + 1) % group_size == 0)
+            if group_end and cum >= budget:
+                end = i + 1
+                break
+        if end is None:
+            raise SystemExit(f"{language}: the selection has {cum:,} tokens, fewer than the {budget:,} budget")
+        texts = [r[0] for r in rows[:end]]
+        docs[language] = texts[:limit] if limit else texts
+        info[language] = {"documents": end, "tokens_with_eos": cum, "documents_in_file": len(rows)}
+    return docs, info
 
 
 def count_parameters(model) -> tuple[int, int]:
@@ -99,6 +152,11 @@ def main(argv=None):
     parser.add_argument("--output-root", type=Path, default=Path("checkpoints/lora_cpt"))
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="Default: <output-root>/<model name>/<method>_ep<epochs>_seed<seed> (or .../base)")
+    parser.add_argument("--budget", default=None,
+                        help="Train on this budget's part of the selection (e.g. 10M SeaLLM tokens per language); "
+                             "the selection must have been made for a budget at least as large")
+    parser.add_argument("--group-size", type=int, default=5,
+                        help="--budget: documents per selection group in prepare_data.py (round-robin uses its batches)")
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -130,7 +188,9 @@ def main(argv=None):
     if args.batch_size % args.micro_batch_size:
         raise SystemExit("--batch-size must be a multiple of --micro-batch-size")
     args.train_data = args.train_data or Path("data/pilot_selected") / args.method / "documents.csv"
-    run_name = "base" if args.eval_base_only else f"{args.method}_ep{args.epochs}_seed{args.seed}"
+    budget = parse_budget(args.budget) if args.budget else None
+    method_name = f"{args.method}_budget{budget_label(budget)}" if budget else args.method
+    run_name = "base" if args.eval_base_only else f"{method_name}_ep{args.epochs}_seed{args.seed}"
     out_dir = args.output_dir or args.output_root / short_name(args.model) / run_name
     manifest = args.split_manifest or args.pool_dir / "split_manifest.csv"
     device, use_bf16 = args.device, not args.no_bf16
@@ -147,7 +207,13 @@ def main(argv=None):
           f"vocab {len(tokenizer):,}", flush=True)
 
     print("Loading and encoding documents ...", flush=True)
-    train_docs = base.load_train_documents(args.train_data, args.limit_docs)
+    budget_info = None
+    if budget:
+        train_docs, budget_info = load_budget_documents(args.train_data, budget, args.group_size, args.limit_docs)
+        print(f"  budget {budget_label(budget)} of {args.train_data}: "
+              + ", ".join(f"{l} {v['documents']:,}/{v['documents_in_file']:,} docs" for l, v in budget_info.items()), flush=True)
+    else:
+        train_docs = base.load_train_documents(args.train_data, args.limit_docs)
     languages = sorted(train_docs)
     val_docs = base.load_heldout_documents(args.pool_dir, manifest, "validation", args.limit_docs)
     test_docs = base.load_heldout_documents(args.pool_dir, manifest, "test", args.limit_docs)
@@ -182,6 +248,8 @@ def main(argv=None):
         run = base.train(model, train_blocks, val_blocks, languages, args, device, use_bf16, out_dir, eval_log)
         results["run"] = run
         results["data"] = {"train_unique_tokens": unique_tokens, "train": train_blocks["stats"]}
+        if budget_info:
+            results["data"]["budget"] = {"tokens_per_language": budget, "selection": budget_info}
         steps, tokens = run["steps"], run["tokens_consumed"]
 
     print("Final evaluation ...", flush=True)

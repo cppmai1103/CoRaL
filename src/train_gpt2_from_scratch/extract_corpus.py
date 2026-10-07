@@ -44,7 +44,11 @@ completely; large ones only in ~target / (1000 f x eligible share) random row gr
 import argparse
 import csv
 import hashlib
+import itertools
 import json
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import random
 import re
 import statistics
@@ -141,7 +145,7 @@ def stream_fineweb2(config: str):
 
 
 def random_sample_fineweb2(config: str, target: int, seed: int, language: str, min_group_fraction: float,
-                           info: dict, log=print):
+                           info: dict, log=print, workers: int = 16):
     """Documents of `config` in random order (see the module docstring); `info` receives what was read."""
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem
@@ -164,16 +168,36 @@ def random_sample_fineweb2(config: str, target: int, seed: int, language: str, m
     log(f"[{language}] random sample: {total:,} rows in {len(groups):,} row groups of {len(files)} file(s); "
         f"keeping a random {fraction:.1%} of each row group read")
     columns = ["text", "id", "url", "dump", "date", "language_score"]
-    handles = {}
-    for fi, g, n_rows in groups:
+    local = threading.local()  # one open handle per (thread, file): file objects are not shared between threads
+
+    def read(fi: int, g: int) -> dict:
+        handles = local.__dict__.setdefault("handles", {})
         if fi not in handles:
             handles[fi] = pq.ParquetFile(fs.open(files[fi]))
-        table = handles[fi].read_row_group(g, columns=columns).to_pydict()
-        info["row_groups_read"] += 1
-        k = n_rows if fraction >= 1 else round(fraction * n_rows)
-        for i in sorted(rng.sample(range(n_rows), k)):
-            yield SimpleNamespace(id=table["id"][i], text=table["text"][i],
-                                  metadata={c: table[c][i] for c in ("url", "dump", "date", "language_score")})
+        return handles[fi].read_row_group(g, columns=columns).to_pydict()
+
+    # Row groups are downloaded `workers` at a time but consumed strictly in the shuffled order, and the row
+    # sampling below draws from `rng` in that order, so the documents are identical to a one-at-a-time read.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = deque()
+        it = iter(groups)
+        for fi, g, n_rows in itertools.islice(it, 2 * workers):
+            pending.append((n_rows, pool.submit(read, fi, g)))
+        try:
+            while pending:
+                n_rows, future = pending.popleft()
+                table = future.result()
+                nxt = next(it, None)
+                if nxt is not None:
+                    pending.append((nxt[2], pool.submit(read, nxt[0], nxt[1])))
+                info["row_groups_read"] += 1
+                k = n_rows if fraction >= 1 else round(fraction * n_rows)
+                for i in sorted(rng.sample(range(n_rows), k)):
+                    yield SimpleNamespace(id=table["id"][i], text=table["text"][i],
+                                          metadata={c: table[c][i] for c in ("url", "dump", "date", "language_score")})
+        finally:  # also when the caller stops early (target reached): drop downloads still queued
+            for _, future in pending:
+                future.cancel()
 
 
 def collect_documents(stream, target: int, *, language: str, config: str, source: str,
@@ -259,7 +283,7 @@ def extract_language(language: str, args, banned: set) -> tuple[list[dict], dict
             return stream_fineweb2(cfg)
         sampling[cfg] = {}
         return random_sample_fineweb2(cfg, target, args.seed, language, args.min_group_fraction, sampling[cfg],
-                                      log=lambda m: print(m, flush=True))
+                                      log=lambda m: print(m, flush=True), workers=args.workers)
 
     target_removed = round(args.target_per_language * (1 - args.clean_ratio))
     if target_removed > 0:
@@ -281,6 +305,37 @@ def extract_language(language: str, args, banned: set) -> tuple[list[dict], dict
         print(f"[{language}] WARNING: only {len(rows)}/{args.target_per_language} documents available", flush=True)
     check_no_overlap(rows, exclude_ids, exclude_hashes)
     return rows, stats
+
+
+def truncate_language(csv_path: Path, stats_path: Path, target: int) -> None:
+    """Keep the first `target` documents of an extraction that kept more (--truncate). With --sampling random
+    the documents are in random order, so the first `target` are a random sample too. The CSV is rewritten
+    through a temporary file; the stats record the original count."""
+    csv.field_size_limit(sys.maxsize)
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    if stats["kept"] <= target:
+        print(f"[{stats['language']}] {stats['kept']} documents, nothing to truncate", flush=True)
+        return
+    tmp = csv_path.with_suffix(".csv.tmp")
+    kept = []
+    with csv_path.open(encoding="utf-8", newline="") as fin, tmp.open("w", encoding="utf-8", newline="") as fout:
+        reader = csv.DictReader(fin)
+        writer = csv.DictWriter(fout, fieldnames=reader.fieldnames)
+        writer.writeheader()
+        for row in reader:
+            if len(kept) == target:
+                break
+            writer.writerow(row)
+            kept.append({"char_len": int(row["char_len"]),
+                         "language_score": float(row["language_score"]) if row["language_score"] else ""})
+    if len(kept) < target:
+        tmp.unlink()
+        raise SystemExit(f"{csv_path} has only {len(kept)} rows, fewer than {target}")
+    tmp.replace(csv_path)
+    stats.update({"truncated_from": stats["kept"], "kept": target, "target": target, "summary": summarise(kept)})
+    stats["clean"]["kept"] = target - stats["removed"]["kept"]
+    stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    print(f"[{stats['language']}] kept the first {target} of {stats['truncated_from']} documents -> {csv_path}", flush=True)
 
 
 def check_no_overlap(rows: list[dict], exclude_ids: set, exclude_hashes: set) -> None:
@@ -357,15 +412,26 @@ def main():
                         help="Annotated data used to train the raters (documents to exclude)")
     parser.add_argument("--output-dir", type=Path, default=Path("data/pilot_corpus"))
     parser.add_argument("--force", action="store_true", help="Re-extract languages that already have a complete CSV")
+    parser.add_argument("--truncate", action="store_true",
+                        help="Do not extract: cut already-extracted languages that kept more than "
+                             "--target-per-language down to their first --target-per-language documents")
     parser.add_argument("--sampling", choices=["stream", "random"], default="stream",
                         help="stream: first eligible documents in file order (default, how data/pilot_corpus was made); "
                              "random: seeded random sample of the whole config")
     parser.add_argument("--seed", type=int, default=42, help="--sampling random only")
+    parser.add_argument("--workers", type=int, default=16,
+                        help="--sampling random: row groups downloaded in parallel (same documents for any value)")
     parser.add_argument("--min-group-fraction", type=float, default=0.1,
                         help="--sampling random: smallest share of each row group's rows kept")
     args = parser.parse_args()
     if not 0 <= args.clean_ratio <= 1:
         raise SystemExit("--clean-ratio must be between 0 and 1")
+
+    if args.truncate:
+        for language in args.languages:
+            truncate_language(args.output_dir / f"{language}.csv", args.output_dir / f"{language}.stats.json",
+                              args.target_per_language)
+        return
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     banned = load_banned_words()

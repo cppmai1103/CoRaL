@@ -10,6 +10,12 @@ documents (split_corpus.py) are never eligible. Two independent choices:
                           model output, ties broken by doc_id; every candidate document must
                           have a score.
 
+               round-robin  one ranking per dimension (--scores-dirs, e.g. the 5 dimension folders): each batch
+                          takes the next --per-dimension documents (default 5) from every dimension's ranking,
+                          drops documents already selected (in this batch or earlier), and adds the rest; batches
+                          are added until --target-tokens is reached (--select-by tokens only). Each selected
+                          document records which dimension(s) put it in (selected_by) and the batch (round).
+
   --select-by  docs       (default) keep exactly --num-docs documents per language.
                tokens     keep documents in the method's order (random or ranked), growing the
                           selection --group-size documents at a time (default 5), until each
@@ -33,6 +39,9 @@ Run from the project root, after extract_corpus and split_corpus (top-score also
         --output-dir data/pilot_selected/random_5M
     python -m src.train_gpt2_from_scratch.prepare_data --select-by tokens --target-tokens 5000000 \\
         --method top-score --scores-dir data/pilot_scores/avg5_mean --output-dir data/pilot_selected/avg5_5M
+    python -m src.train_gpt2_from_scratch.prepare_data --select-by tokens --target-tokens 50000000 \\
+        --method round-robin --scores-dirs data/pilot_scores/{educational_value,professionalism,reasoning,cleanliness,cultural_nuances}_mean \\
+        --output-dir data/pilot_selected/rr5_50M
 
 Outputs in --output-dir (default data/pilot_selected/random/, data/pilot_selected/top_score/, or with a
 _<N>Mtok suffix when --select-by tokens):
@@ -58,7 +67,8 @@ DEFAULT_GROUP_SIZE = 5
 DEFAULT_TOKENIZER = "SeaLLMs/SeaLLM-7B-v2"
 OUT_FIELDS = ["doc_id", "language", "source", "text", "char_len", "tokens", "tokens_with_eos",
               "language_score", "url", "dump", "date"]
-METHODS = ["random", "top-score"]
+METHODS = ["random", "top-score", "round-robin"]
+DEFAULT_PER_DIMENSION = 5
 SELECT_BY = ["docs", "tokens"]
 
 
@@ -133,6 +143,48 @@ def select_by_token_budget(ordered: list[dict], token_counts_with_eos: list[int]
         if cumulative >= target_tokens:
             break
     return ordered[:kept], cumulative
+
+
+def select_round_robin(pool: list[dict], scores_by_dim: dict[str, dict[str, float]], per_dimension: int,
+                       target_tokens: int, tokenizer, language: str) -> tuple[list[dict], dict]:
+    """Batches of the next `per_dimension` documents of every dimension's ranking (dimensions in the order of
+    `scores_by_dim`), without documents already selected, until the running token count (with one EOS per
+    document) reaches `target_tokens`. The last batch is kept whole, so the total can overshoot the target but
+    never falls short of it; running out of pool first raises. Tokens are counted only for selected documents.
+    Returns (selected rows with tokens/selected_by/round, per-dimension contribution counts)."""
+    rankings = {dim: rank_all_by_score(pool, scores, f"{language}/{dim}") for dim, scores in scores_by_dim.items()}
+    positions = {dim: 0 for dim in rankings}
+    chosen: dict[str, dict] = {}   # doc_id -> selected row
+    selected: list[dict] = []
+    contribution = {dim: 0 for dim in rankings}
+    total, round_no = 0, 0
+    while total < target_tokens:
+        if all(positions[d] >= len(pool) for d in rankings):
+            raise ValueError(f"{language}: pool exhausted at {total:,} tokens, short of the {target_tokens:,}-token target")
+        round_no += 1
+        batch: list[dict] = []
+        for dim, ranked in rankings.items():
+            for r in ranked[positions[dim]:positions[dim] + per_dimension]:
+                if r["doc_id"] in chosen:  # duplicate: picked earlier, or by another dimension in this batch
+                    chosen[r["doc_id"]]["selected_by"].append(dim)
+                    continue
+                row = dict(r, selected_by=[dim], round=round_no)
+                chosen[r["doc_id"]] = row
+                batch.append(row)
+                contribution[dim] += 1
+            positions[dim] += per_dimension
+        for row, n in zip(batch, count_tokens([r["text"] for r in batch], tokenizer)):
+            row["tokens"], row["tokens_with_eos"] = n, n + 1
+            total += n + 1
+        selected += batch
+    for row in selected:
+        row["selected_by"] = "+".join(row["selected_by"])
+    return selected, contribution
+
+
+def dimension_name(scores_dir: Path) -> str:
+    name = scores_dir.name
+    return name[:-len("_mean")] if name.endswith("_mean") else name
 
 
 # --------------------------------------------------------------------------
@@ -221,13 +273,19 @@ def build_markdown(summaries: list[dict], args, baseline: dict[str, int] | None 
             columns += [("Random baseline tokens", lambda s: f"{baseline[s['language']]:,}" if s["language"] in baseline else ""),
                         ("Ratio to random", lambda s: f"{s['selected_tokens_with_eos'] / baseline[s['language']]:.2f}"
                          if s["language"] in baseline else "")]
-    method_label = "Random" if args.method == "random" else "Top-score"
+    method_label = {"random": "Random", "top-score": "Top-score", "round-robin": "Round-robin"}[args.method]
     if by_tokens:
         title = f"{method_label} selection, token budget"
-        order_desc = (f"random order (seed {args.seed})" if args.method == "random"
-                      else f"ranked order by the rater score in `{args.scores_dir}` (ties by doc_id)")
-        how = (f"Documents kept in {order_desc}, grown {args.group_size} at a time until each language's running "
-               f"token count reaches {args.target_tokens:,}. ")
+        if args.method == "round-robin":
+            dims = ", ".join(dimension_name(d) for d in args.scores_dirs)
+            how = (f"Each batch takes the next {args.per_dimension} documents of every dimension's ranking ({dims}; "
+                   f"unclipped rater scores, ties by doc_id), drops documents already selected, and adds the rest, "
+                   f"until each language's running token count reaches {args.target_tokens:,}. ")
+        else:
+            order_desc = (f"random order (seed {args.seed})" if args.method == "random"
+                          else f"ranked order by the rater score in `{args.scores_dir}` (ties by doc_id)")
+            how = (f"Documents kept in {order_desc}, grown {args.group_size} at a time until each language's running "
+                   f"token count reaches {args.target_tokens:,}. ")
     elif args.method == "random":
         title = "Random baseline selection"
         how = f"Uniform random sample of {args.num_docs} documents per language, seed {args.seed}. "
@@ -255,7 +313,18 @@ def build_markdown(summaries: list[dict], args, baseline: dict[str, int] | None 
             cells["Random baseline tokens"] = f"{base:,}"
             cells["Ratio to random"] = f"{total / base:.2f}"
         lines.append("| " + " | ".join(str(cells.get(c[0], "")) for c in columns) + " |")
-    if by_tokens:
+    if args.method == "round-robin":
+        dims = [dimension_name(d) for d in args.scores_dirs]
+        lines += ["", "## Documents contributed by each dimension", "",
+                  "First dimension to pick a document in its batch (a document several dimensions rank in the same "
+                  "batch counts for the first in this order); `selected_by` in documents.csv lists all of them.", "",
+                  "| Language | Batches | " + " | ".join(dims) + " |", "| --- | --- | " + " | ".join(["---"] * len(dims)) + " |"]
+        for s in summaries:
+            lines.append(f"| {s['language']} | {s['rounds']} | "
+                         + " | ".join(str(s["dimension_contribution"][d]) for d in dims) + " |")
+        lines += ["", "Selection grows in whole batches, so the actual token total can overshoot the target (see "
+                  "'Over target') but never falls short of it."]
+    elif by_tokens:
         lines += ["", f"Selection grows in whole groups of {args.group_size} documents, so the actual token total can "
                   "overshoot the target (see 'Over target') but never falls short of it. Compare methods at the same "
                   "target to hold the token budget fixed while the selection itself varies."]
@@ -281,6 +350,10 @@ def main():
                         help="Default: data/pilot_selected/random or data/pilot_selected/top_score")
     parser.add_argument("--scores-dir", type=Path, default=Path("data/pilot_scores/educational_value_mean"),
                         help="top-score only: the folder written by score_pool.py")
+    parser.add_argument("--scores-dirs", type=Path, nargs="+", default=None,
+                        help="round-robin only: one score_pool.py folder per dimension, in the order batches take them")
+    parser.add_argument("--per-dimension", type=int, default=DEFAULT_PER_DIMENSION,
+                        help="round-robin only: documents taken from each dimension's ranking per batch (default 5)")
     parser.add_argument("--compare-with", type=Path, default=Path("data/pilot_selected/random/summary.json"),
                         help="top-score only: Random-baseline summary.json for the token ratio column (skipped if missing)")
     parser.add_argument("--languages", nargs="+", default=None, help="Default: every <language>.csv in --pool-dir")
@@ -301,6 +374,11 @@ def main():
     parser.add_argument("--no-count-tokens", action="store_true", help="select-by=docs only: skip loading the tokenizer")
     args = parser.parse_args()
 
+    if args.method == "round-robin":
+        if args.select_by != "tokens":
+            raise SystemExit("--method round-robin needs --select-by tokens")
+        if not args.scores_dirs or len(args.scores_dirs) < 2:
+            raise SystemExit("--method round-robin needs --scores-dirs with at least two dimension folders")
     if args.select_by == "tokens":
         if args.target_tokens is None:
             raise SystemExit("--target-tokens is required with --select-by tokens")
@@ -308,7 +386,7 @@ def main():
             raise SystemExit("--no-count-tokens cannot be used with --select-by tokens: token counts drive the selection")
 
     if args.output_dir is None:
-        base = "random" if args.method == "random" else "top_score"
+        base = {"random": "random", "top-score": "top_score", "round-robin": f"rr{args.per_dimension}"}[args.method]
         if args.select_by == "tokens":
             size = f"{args.target_tokens // 1_000_000}M" if args.target_tokens % 1_000_000 == 0 else str(args.target_tokens)
             base = f"{base}_{size}tok"
@@ -329,13 +407,17 @@ def main():
         missing = [l for l in languages if not (args.scores_dir / f"{l}.csv").is_file()]
         if missing:
             raise SystemExit(f"No rater scores for {missing} in {args.scores_dir}. Run score_pool.py first.")
+    if args.method == "round-robin":
+        missing = [f"{d}/{l}.csv" for d in args.scores_dirs for l in languages if not (d / f"{l}.csv").is_file()]
+        if missing:
+            raise SystemExit(f"No rater scores: {missing[:5]}. Run score_pool.py first.")
 
     tokenizer = None
     if not args.no_count_tokens:
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 
-    fields = OUT_FIELDS + (["rater_score"] if args.method == "top-score" else [])
+    fields = OUT_FIELDS + {"random": [], "top-score": ["rater_score"], "round-robin": ["selected_by", "round"]}[args.method]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     summaries = []
     with (args.output_dir / "documents.csv").open("w", encoding="utf-8", newline="") as f:
@@ -358,6 +440,10 @@ def main():
                 if tokenizer is not None:
                     for r, n in zip(selected, count_tokens([r["text"] for r in selected], tokenizer)):
                         r["tokens"], r["tokens_with_eos"] = n, n + 1
+            elif args.method == "round-robin":
+                scores_by_dim = {dimension_name(d): load_scores(d / f"{language}.csv") for d in args.scores_dirs}
+                selected, contribution = select_round_robin(pool, scores_by_dim, args.per_dimension,
+                                                            args.target_tokens, tokenizer, language)
             else:  # tokens
                 if args.method == "random":
                     ordered = order_random_all(pool, args.seed, language)
@@ -377,6 +463,14 @@ def main():
             target = args.target_tokens if args.select_by == "tokens" else None
             summaries.append(summarise(language, pool, selected, scores, target))
             s = summaries[-1]
+            if args.method == "round-robin":
+                s["rounds"] = selected[-1]["round"]
+                s["dimension_contribution"] = contribution
+                s["selected_mean_score_by_dimension"] = {
+                    d: round(statistics.mean(sc[r["doc_id"]] for r in selected), 3) for d, sc in scores_by_dim.items()}
+                s["pool_mean_score_by_dimension"] = {
+                    d: round(statistics.mean(sc[r["doc_id"]] for r in pool), 3) for d, sc in scores_by_dim.items()}
+                print(f"[{language}] round-robin: {s['rounds']} batches, contribution {contribution}", flush=True)
             print(f"[{language}] selected {len(selected)} of {len(pool)}"
                   + (f" (mean score {s['pool_mean_score']} -> {s['selected_mean_score']}, lowest kept {s['selected_min_score']})"
                      if scores is not None else "")
