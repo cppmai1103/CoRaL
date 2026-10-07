@@ -81,8 +81,8 @@ def repo_id(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dataset-repo", type=repo_id, default="cppmai/sea-rater-data")
-    parser.add_argument("--model-repo", type=repo_id, default="cppmai/sea-rater-models")
+    parser.add_argument("--dataset-repo", type=repo_id, default="cppmai/sea-rater-data-7languages")
+    parser.add_argument("--model-repo", type=repo_id, default="cppmai/sea-rater-models-7languages")
     parser.add_argument("--only", choices=["both", "dataset", "model"], default="both")
     parser.add_argument("--dataset-dir", type=Path, default=ROOT / "data/annotation_batches")
     parser.add_argument("--prepared-dir", type=Path, default=ROOT / "data/rater_dataset")
