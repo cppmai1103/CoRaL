@@ -6,7 +6,7 @@ next-token loss/perplexity -- the same metric used throughout this project -- on
 independent of the pilot corpus:
 
   wikipedia  wikimedia/wikipedia  20231101 dump, 1,000 randomly sampled ELIGIBLE articles per
-             language (fil->tl, indo->id, khmer->km, malay->ms, thai->th, vie->vi), after
+             language (fil->tl, indo->id, khmer->km, malay->ms, thai->th, vie->vi, burmese->my), after
              rejecting empty/too-short/list-navigation-like text (section 2's cleaning criteria;
              see is_eligible_wikipedia_article's docstring for the exact, documented heuristic)
              and excluding any article whose exact text (sha256 of the stripped string, same
@@ -83,9 +83,10 @@ def progress(iterable, **kwargs):
     return tqdm(iterable, **kwargs)
 
 
-WIKIPEDIA_LANGUAGES = {"fil": "tl", "indo": "id", "khmer": "km", "malay": "ms", "thai": "th", "vie": "vi"}
+WIKIPEDIA_LANGUAGES = {"fil": "tl", "indo": "id", "khmer": "km", "malay": "ms", "thai": "th", "vie": "vi",
+                       "burmese": "my"}
 SIB200_LANGUAGES = {"fil": "tgl_Latn", "indo": "ind_Latn", "khmer": "khm_Khmr",
-                    "malay": "zsm_Latn", "thai": "tha_Thai", "vie": "vie_Latn"}
+                    "malay": "zsm_Latn", "thai": "tha_Thai", "vie": "vie_Latn", "burmese": "mya_Mymr"}
 
 
 # --------------------------------------------------------------------------

@@ -140,7 +140,6 @@ python -m src.train_gpt2_from_scratch.eval_downstream \
   --run-dir $RUN_DIRS \
   --benchmarks belebele xcopa \
   --comparison-file "$OUT_ROOT"/downstream_comparison.md \
-  --num-samples 500 \
   --device cuda
 
 echo "=== Wikipedia/SIB-200 loss+perplexity evaluation ==="

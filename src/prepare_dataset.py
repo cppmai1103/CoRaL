@@ -26,7 +26,7 @@ for per-dimension splits:
     language, so that dimension's score distribution is preserved across
     train/validation/test
 
-Input: data/annotation_batches/<language>/<language>_clean.csv (from cppmai/sea-rater).
+Input: data/annotation_batches/<language>_clean.csv (from cppmai/sea-rater).
 Output per dimension: data/rater_dataset/split_manifest_<dimension>.csv
 Shared output: data/rater_dataset/document_table.csv (all 5 raw scores and all 5
     per-dimension split columns), data/rater_dataset/excluded_documents.csv
@@ -66,8 +66,8 @@ TARGET_LANGUAGES = ["indo", "vie", "thai", "malay", "fil", "khmer", "lao", "burm
 
 def discover_language_files(input_dir: Path) -> dict[str, Path]:
     files = {}
-    for path in sorted(input_dir.glob("*/*_clean.csv")):
-        lang = path.parent.name
+    for path in sorted(input_dir.glob("*_clean.csv")):
+        lang = path.name.removesuffix("_clean.csv")
         files[lang] = path
     return files
 
@@ -289,7 +289,7 @@ def main():
 
     lang_files = discover_language_files(args.input_dir)
     if not lang_files:
-        raise SystemExit(f"No <language>/<language>_clean.csv files found under {args.input_dir}")
+        raise SystemExit(f"No <language>_clean.csv files found under {args.input_dir}")
 
     all_rows: dict[str, list[dict]] = {}
     for lang, path in lang_files.items():

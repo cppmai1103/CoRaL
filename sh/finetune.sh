@@ -8,7 +8,7 @@
 #SBATCH --output=job-%j.out
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
-#SBATCH --mem=32GB
+#SBATCH --mem=16GB
 #SBATCH --gres=gpu:1
 #SBATCH --qos=normal
 
@@ -21,13 +21,17 @@ set -eo pipefail
 #   sbatch --time=12:00:00 --export=ALL,MODE=full sh/finetune.sh
 MODE="${MODE:-test}"
 TEST_DIMENSION="${TEST_DIMENSION:-reasoning}"
+# DATASET_DIR: output of src.prepare_dataset; OUTPUT_ROOT: checkpoints go to $OUTPUT_ROOT/<pooling>.
+#   sbatch --time=12:00:00 --export=ALL,DATASET_DIR=data/rater_dataset_7languages,OUTPUT_ROOT=checkpoints/rater_7languages/finetuned sh/finetune.sh
+DATASET_DIR="${DATASET_DIR:-data/rater_dataset}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-checkpoints/rater/finetuned}"
 
 PYTHON_VERSION=3.11
 ENVIRONMENT_NAME="sea-rater"   # own environment: other projects share "huhu" and changed its transformers version
 
 # $SLURM_SUBMIT_DIR is the real submission dir; $0 points to SLURM's spool copy.
 cd "$SLURM_SUBMIT_DIR"
-echo "Working directory: $(pwd) | MODE=$MODE"
+echo "Working directory: $(pwd) | MODE=$MODE | DATASET_DIR=$DATASET_DIR | OUTPUT_ROOT=$OUTPUT_ROOT"
 
 module load Anaconda3
 source /opt/easybuild/software/Anaconda3/2024.02-1/etc/profile.d/conda.sh
@@ -84,7 +88,9 @@ for POOLING in mean; do
     python -m src.train_rater.finetune \
       --dimension "$DIMENSION" \
       --pooling "$POOLING" \
-      --output-dir "checkpoints/rater/finetuned/$POOLING" \
+      --document-table "$DATASET_DIR/document_table.csv" \
+      --split-manifest-dir "$DATASET_DIR" \
+      --output-dir "$OUTPUT_ROOT/$POOLING" \
       --device cuda
   done
 done

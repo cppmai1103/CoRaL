@@ -20,11 +20,16 @@ set -eo pipefail
 # data/pilot_scores/ are untouched). Already-scored languages are skipped on a rerun (score_pool.py).
 #
 # Run: DIMENSION=educational_value sbatch sh/score_pool_llm.sh
+# Any other rater/pool, e.g. the 7-language human rater on the 7-language corpus:
+#   DIMENSION=reasoning RATER_ROOT=checkpoints/rater_7languages/finetuned SCORES_ROOT=data/pilot_scores_7languages \
+#     POOL_DIR=data/pilot_corpus_7languages sbatch sh/score_pool_llm.sh
 
 DIMENSION="${DIMENSION:-educational_value}"
 POOLING="${POOLING:-mean}"
 RATER_ROOT="${RATER_ROOT:-checkpoints/rater_llm/finetuned}"
 SCORES_ROOT="${SCORES_ROOT:-data/pilot_scores_llm}"
+POOL_DIR="${POOL_DIR:-data/pilot_corpus}"
+ALL_DOCUMENTS="${ALL_DOCUMENTS:-0}"   # 1: score every document of POOL_DIR (no split manifest yet)
 ENVIRONMENT_NAME="sea-rater"
 
 cd "$SLURM_SUBMIT_DIR"
@@ -41,6 +46,8 @@ nvidia-smi
 
 python -m src.train_gpt2_from_scratch.score_pool \
   --rater-dir "$RATER_ROOT/$POOLING/$DIMENSION" \
+  --pool-dir "$POOL_DIR" \
+  $([ "$ALL_DOCUMENTS" = 1 ] && echo --no-split-manifest) \
   --output-dir "$SCORES_ROOT/${DIMENSION}_$POOLING" \
   --device cuda
 

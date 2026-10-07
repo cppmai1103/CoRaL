@@ -30,7 +30,7 @@ set -eo pipefail
 
 MODELS="${MODELS:-google/gemma-3-270m}"
 RUN_DIRS="${RUN_DIRS:-checkpoints/gpt2_top_doc/random_20M_ep1_seed42}"
-NUM_SAMPLES="${NUM_SAMPLES:-500}"
+NUM_SAMPLES="${NUM_SAMPLES:-0}"   # 0 = full official test split
 OUT_ROOT="${OUT_ROOT:-checkpoints/hub_models}"
 ENVIRONMENT_NAME="sea-rater"
 

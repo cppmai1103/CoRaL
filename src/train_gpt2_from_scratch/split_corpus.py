@@ -18,9 +18,17 @@ Method (per language, seeded):
 Consequence: validation/test come from smaller sites, while train also holds the
 big ones. This is stricter than a random split, and the report shows the difference.
 
+Keeping existing held-out sets (--keep-eval-from <old split_manifest.csv>): for every language in that manifest,
+its validation/test documents keep their split exactly (they must all still be in the corpus), every other
+document is train, except documents from a website that is in validation/test, which are marked "excluded"
+(no site crosses splits; no consumer ever reads "excluded" rows). Languages missing from it are split as usual.
+This lets a larger extraction (same stream order, so a superset of the old corpus) keep the old evaluation sets.
+
 Run from the project root, after extract_corpus:
     python -m src.train_gpt2_from_scratch.split_corpus                      # 500 validation + 1000 test per language
     python -m src.train_gpt2_from_scratch.split_corpus --validation 250 --test 250
+    python -m src.train_gpt2_from_scratch.split_corpus --corpus-dir data/pilot_corpus_7languages \
+        --keep-eval-from data/pilot_corpus/split_manifest.csv
 
 Outputs in --corpus-dir (default data/pilot_corpus/):
     split_manifest.csv   doc_id, language, split, domain, char_len, source
@@ -37,6 +45,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 SPLITS = ["train", "validation", "test"]
+EXCLUDED = "excluded"  # same website as a kept validation/test document (--keep-eval-from only)
 DEFAULT_SIZES = {"validation": 500, "test": 1000}  # train = everything else
 DEFAULT_SEED = 42
 DEFAULT_MAX_EVAL_GROUP = 10
@@ -84,13 +93,27 @@ def split_documents(docs: list[dict], sizes: dict[str, int], seed: int, max_eval
 
 
 def load_language(path: Path) -> list[dict]:
+    """Rows without their text (only what the split, manifest and report need), so 500K-document
+    languages fit in memory."""
     csv.field_size_limit(sys.maxsize)
+    rows = []
     with path.open(encoding="utf-8", newline="") as f:
-        rows = list(csv.DictReader(f))
-    for r in rows:
-        r["domain"] = domain_of(r.get("url", ""), r["doc_id"])
-        r["char_len"] = int(r["char_len"])
+        for r in csv.DictReader(f):
+            rows.append({"doc_id": r["doc_id"], "language": r.get("language", ""), "source": r.get("source", ""),
+                         "domain": domain_of(r.get("url", ""), r["doc_id"]), "char_len": int(r["char_len"]),
+                         "language_score": r.get("language_score", "")})
     return rows
+
+
+def keep_eval_assignment(rows: list[dict], kept: dict[str, str]) -> dict[str, str]:
+    """kept: {doc_id: validation|test} from an earlier manifest. Returns {doc_id: split} for all rows."""
+    present = {r["doc_id"] for r in rows}
+    missing = [d for d in kept if d not in present]
+    if missing:
+        raise ValueError(f"{len(missing)} kept validation/test documents are not in the corpus, e.g. {missing[:3]}")
+    eval_domains = {r["domain"] for r in rows if r["doc_id"] in kept}
+    return {r["doc_id"]: kept.get(r["doc_id"]) or (EXCLUDED if r["domain"] in eval_domains else "train")
+            for r in rows}
 
 
 def build_report(per_language: dict[str, list[dict]], sizes: dict[str, int], args) -> str:
@@ -103,8 +126,10 @@ def build_report(per_language: dict[str, list[dict]], sizes: dict[str, int], arg
              "| Language | Split | Documents | Sites | Largest site (docs) | Median chars | Mean language score |",
              "| --- | --- | --- | --- | --- | --- | --- |"]
     for lang, rows in per_language.items():
-        for split in SPLITS:
+        for split in SPLITS + [EXCLUDED]:
             sub = [r for r in rows if r["split"] == split]
+            if not sub:
+                continue
             sites = defaultdict(int)
             for r in sub:
                 sites[r["domain"]] += 1
@@ -118,9 +143,12 @@ def build_report(per_language: dict[str, list[dict]], sizes: dict[str, int], arg
     for lang, rows in per_language.items():
         by_domain = defaultdict(set)
         for r in rows:
-            by_domain[r["domain"]].add(r["split"])
+            if r["split"] != EXCLUDED:
+                by_domain[r["domain"]].add(r["split"])
         crossing = sum(1 for s in by_domain.values() if len(s) > 1)
-        lines.append(f"- {lang}: {len(rows)} documents, {crossing} sites appear in more than one split.")
+        n_excluded = sum(r["split"] == EXCLUDED for r in rows)
+        lines.append(f"- {lang}: {len(rows)} documents, {crossing} sites appear in more than one split"
+                     + (f", {n_excluded} excluded (same site as a kept validation/test document)." if n_excluded else "."))
     lines += ["", "## Notes", "",
               "- Validation and test contain only small sites, so they are not identical in site mix to train, "
               "which also holds the large sites. Compare selection methods on the same held-out documents.",
@@ -140,6 +168,8 @@ def main():
     parser.add_argument("--validation", type=int, default=DEFAULT_SIZES["validation"])
     parser.add_argument("--test", type=int, default=DEFAULT_SIZES["test"])
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--keep-eval-from", type=Path, default=None,
+                        help="Earlier split_manifest.csv whose validation/test documents are kept as they are")
     parser.add_argument("--max-eval-group-size", type=int, default=DEFAULT_MAX_EVAL_GROUP,
                         help="Largest site allowed in validation/test (documents)")
     args = parser.parse_args()
@@ -148,17 +178,29 @@ def main():
     if not languages:
         raise SystemExit(f"No <language>.csv files found in {args.corpus_dir}")
 
+    kept_eval: dict[str, dict[str, str]] = defaultdict(dict)
+    if args.keep_eval_from:
+        with args.keep_eval_from.open(encoding="utf-8", newline="") as f:
+            for r in csv.DictReader(f):
+                if r["split"] in ("validation", "test"):
+                    kept_eval[r["language"]][r["doc_id"]] = r["split"]
+
     per_language, manifest = {}, []
     for lang in languages:
         rows = load_language(args.corpus_dir / f"{lang}.csv")
         sizes = {"train": args.train if args.train is not None else len(rows) - args.validation - args.test,
                  "validation": args.validation, "test": args.test}
-        assignment = split_documents(rows, sizes, args.seed, args.max_eval_group_size)
+        if lang in kept_eval:
+            assignment = keep_eval_assignment(rows, kept_eval[lang])
+            print(f"[{lang}] kept {len(kept_eval[lang])} validation/test documents from {args.keep_eval_from}", flush=True)
+        else:
+            assignment = split_documents(rows, sizes, args.seed, args.max_eval_group_size)
         for r in rows:
             r["split"] = assignment[r["doc_id"]]
         per_language[lang] = rows
         manifest += [{k: r.get(k, "") for k in MANIFEST_FIELDS} for r in rows]
-        print(f"[{lang}] " + ", ".join(f"{s}={sum(r['split'] == s for r in rows)}" for s in SPLITS), flush=True)
+        print(f"[{lang}] " + ", ".join(f"{s}={sum(r['split'] == s for r in rows)}" for s in SPLITS + [EXCLUDED]),
+              flush=True)
 
     with (args.corpus_dir / "split_manifest.csv").open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS)

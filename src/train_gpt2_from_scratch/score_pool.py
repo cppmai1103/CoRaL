@@ -47,19 +47,22 @@ OUT_FIELDS = ["doc_id", "language", "score_raw", "score", "mmbert_tokens"]
 THRESHOLD_FIELDS = ["language", "scored", "top_k", "threshold", "share_kept", "mean", "median", "p90", "share_above_5"]
 
 
-def load_candidates(pool_dir: Path, manifest: Path, language: str, limit: int = 0,
+def load_candidates(pool_dir: Path, manifest: Path | None, language: str, limit: int = 0,
                     splits: tuple[str, ...] = ("train",)) -> list[dict]:
-    """Pool documents of `language` whose split is in `splits` (default: the candidate pool), in file order."""
+    """Pool documents of `language` whose split is in `splits` (default: the candidate pool), in file order.
+    manifest=None: every document of <language>.csv (corpus not split yet)."""
     csv.field_size_limit(sys.maxsize)
-    wanted = set()
-    with manifest.open(encoding="utf-8", newline="") as f:
-        for row in csv.DictReader(f):
-            if row["language"] == language and row["split"] in splits:
-                wanted.add(row["doc_id"])
+    wanted = None
+    if manifest is not None:
+        wanted = set()
+        with manifest.open(encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                if row["language"] == language and row["split"] in splits:
+                    wanted.add(row["doc_id"])
     docs = []
     with (pool_dir / f"{language}.csv").open(encoding="utf-8", newline="") as f:
         for row in csv.DictReader(f):
-            if row["doc_id"] in wanted:
+            if wanted is None or row["doc_id"] in wanted:
                 docs.append({"doc_id": row["doc_id"], "text": row["text"]})
                 if limit and len(docs) >= limit:
                     break
@@ -217,7 +220,11 @@ def main():
                         help="Manifest split(s) to score (default: train, the candidate pool). Use "
                              "'validation'/'test' to score held-out documents instead (point --output-dir "
                              "elsewhere so it doesn't mix with the candidate-pool scores)")
-    parser.add_argument("--languages", nargs="+", default=None, help="Default: every language in the manifest")
+    parser.add_argument("--no-split-manifest", action="store_true",
+                        help="Score every document of each <language>.csv (corpus not split yet); selection later "
+                             "keeps only the manifest's train documents")
+    parser.add_argument("--languages", nargs="+", default=None,
+                        help="Default: every language in the manifest (with --no-split-manifest: every <language>.csv)")
     parser.add_argument("--max-length", type=int, default=4096, help="Truncation length; keep it equal to training")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--limit", type=int, default=0, help="Debug: only the first N candidate documents per language")
@@ -233,10 +240,12 @@ def main():
     args = parser.parse_args()
 
     gpt.PROGRESS = not args.no_progress
-    manifest = args.split_manifest or args.pool_dir / "split_manifest.csv"
+    manifest = None if args.no_split_manifest else (args.split_manifest or args.pool_dir / "split_manifest.csv")
     use_bf16 = not args.no_bf16
     languages = args.languages
-    if languages is None:
+    if languages is None and manifest is None:
+        languages = sorted(p.stem for p in args.pool_dir.glob("*.csv") if p.stem != "split_manifest")
+    elif languages is None:
         with manifest.open(encoding="utf-8", newline="") as f:
             languages = sorted({r["language"] for r in csv.DictReader(f)})
 

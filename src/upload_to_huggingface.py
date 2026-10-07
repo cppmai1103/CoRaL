@@ -164,7 +164,7 @@ def validate_prepared(directory):
 
 
 def prepare_dataset(args, destination):
-    if not list(args.dataset_dir.glob("*/*_clean.csv")):
+    if not list(args.dataset_dir.glob("*_clean.csv")):
         raise ValueError(f"No language clean CSV files in {args.dataset_dir}")
     copy_artifacts(args.dataset_dir, destination, DATA_SUFFIXES)
     prepared = destination / "rater_dataset"
