@@ -5,8 +5,8 @@ from huggingface_hub import HfApi
 HF_USER      = "cppmai"
 DATASET_REPO = f"{HF_USER}/sea7-data"
 MODEL_REPO   = f"{HF_USER}/sea7-checkpoints"
-DATASET_DIR  = "checkpoints"
-CKPT_DIR     = "data"
+DATASET_DIR  = "data"
+CKPT_DIR     = "checkpoints"
 PRIVATE      = True
 # ============================
 
