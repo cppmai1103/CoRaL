@@ -22,7 +22,7 @@ Outputs in --output-dir (default checkpoints/tokenizers/sea_bpe_<vocab/1000>k):
 
 Run (CPU, a few minutes):
     python -m src.train_gpt2_from_scratch.train_tokenizer --vocab-size 16000
-Use it for GPT-2 training: TOKENIZER=checkpoints/tokenizers/sea_bpe_16k sbatch sh/train_gpt2_weighted.sh
+Use it for GPT-2 training: TOKENIZER=checkpoints/tokenizers/sea_bpe_16k sbatch sh/train/train_gpt2_weighted.sh
 """
 
 import argparse

@@ -1,0 +1,4 @@
+include: _sea_nli_template_yaml
+task: sea_nli_normal_mya
+dataset_name: normal
+process_docs: !function utils.filter_myanmar

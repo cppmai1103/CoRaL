@@ -1,0 +1,5 @@
+include: _flores_plus_template_yaml
+task: flores_plus_eng_mya
+dataset_kwargs:
+  target: mya_Mymr
+doc_to_text: "Translate the following sentence from English into Burmese.\nEnglish: {{source}}\nBurmese:"

@@ -1,0 +1,5 @@
+include: _flores_plus_template_yaml
+task: flores_plus_eng_tha
+dataset_kwargs:
+  target: tha_Thai
+doc_to_text: "Translate the following sentence from English into Thai.\nEnglish: {{source}}\nThai:"

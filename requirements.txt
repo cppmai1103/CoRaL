@@ -1,0 +1,16 @@
+# Python 3.11 env "sea-rater" used by every sh/ job. Install torch (CUDA 12.4 build) first, then the rest:
+#   conda create -n sea-rater python=3.11 -y && conda activate sea-rater
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt
+
+transformers==5.14.1   # pinned like sh/rater/finetune.sh and sh/train/train_gpt2.sh
+huggingface_hub
+tokenizers             # sh/data/train_tokenizer.sh
+peft                   # sh/train/lora_cpt.sh
+tqdm
+matplotlib
+pandas
+pyarrow
+pyyaml                 # src/upload_to_huggingface.py
+datatrove              # sh/data/prepare_corpus_7languages.sh (FineWeb2 reader + banned-words list)
+myanmartools           # Burmese Zawgyi detection

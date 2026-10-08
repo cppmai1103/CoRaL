@@ -1,0 +1,5 @@
+include: _flores_plus_template_yaml
+task: flores_plus_eng_vie
+dataset_kwargs:
+  target: vie_Latn
+doc_to_text: "Translate the following sentence from English into Vietnamese.\nEnglish: {{source}}\nVietnamese:"

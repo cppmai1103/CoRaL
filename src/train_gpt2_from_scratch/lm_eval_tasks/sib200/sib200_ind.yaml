@@ -1,0 +1,3 @@
+include: _sib200_template_yaml
+task: sib200_ind
+dataset_name: ind_Latn

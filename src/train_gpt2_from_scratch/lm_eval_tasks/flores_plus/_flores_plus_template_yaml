@@ -1,0 +1,23 @@
+dataset_path: openlanguagedata/flores_plus   # loaded by custom_dataset (utils.load_flores_pairs)
+custom_dataset: !function utils.load_flores_pairs
+test_split: devtest           # scored
+fewshot_split: dev            # demonstrations
+output_type: generate_until
+doc_to_target: "{{target}}"
+target_delimiter: " "
+fewshot_delimiter: "\n\n"
+# One sentence per line, so stop at the first newline (the doc's "\n\n" would let a base model run on into a new
+# "English:" line); greedy decoding.
+generation_kwargs:
+  until:
+    - "\n"
+  do_sample: false
+  max_gen_toks: 256
+# Harness corpus chrF++ (sacrebleu word_order=2); eval_lm_harness.py also recomputes chrF++ and spBLEU
+# (sacrebleu flores200 SentencePiece tokenizer) from the logged hypotheses for the reported scores.
+metric_list:
+  - metric: chrf++
+    aggregation: chrf++
+    higher_is_better: true
+metadata:
+  version: 1.0

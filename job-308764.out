@@ -1,0 +1,92 @@
+# lm-evaluation-harness comparison
+
+Macro-average per benchmark (accuracy in %, FLORES+ chrF++/spBLEU on 0-100); in brackets the difference from random_50M_7languages_ep1_seed42. Overall = core benchmarks only.
+
+| run | belebele | global_piqa | global_mmlu | include | sib200 | sea_nli_normal | sea_nli_hard | overall |
+|---|---|---|---|---|---|---|---|---|
+| base | 27.34 (+1.49) | 59.16 (-0.84) | 24.13 (+0.46) | 23.92 (-1.64) | 69.89 (+1.82) | 32.68 (-0.11) | 51.05 (-0.51) | 33.64 (-0.13) |
+| random_50M_7languages_ep1_seed42 | 25.86 | 60.00 | 23.67 | 25.56 | 68.07 | 32.79 | 51.56 | 33.77 |
+| edu_50M_7languages_ep1_seed42 | 25.37 (-0.49) | 60.84 (+0.84) | 23.79 (+0.13) | 25.45 (-0.11) | 69.96 (+1.89) | 32.94 (+0.15) | 51.05 (-0.51) | 33.86 (+0.09) |
+| cult_50M_7languages_ep1_seed42 | 26.34 (+0.49) | 60.00 (+0.00) | 22.83 (-0.83) | 25.42 (-0.14) | 69.82 (+1.75) | 32.74 (-0.05) | 51.66 (+0.10) | 33.65 (-0.12) |
+| avg5_50M_7languages_ep1_seed42 | 25.43 (-0.43) | 60.63 (+0.63) | 23.83 (+0.17) | 26.01 (+0.46) | 69.96 (+1.89) | 32.68 (-0.11) | 51.18 (-0.38) | 33.98 (+0.21) |
+| rr5_50M_7languages_ep1_seed42 | 25.77 (-0.09) | 60.00 (+0.00) | 23.96 (+0.29) | 25.06 (-0.50) | 70.24 (+2.17) | 32.74 (-0.04) | 51.18 (-0.38) | 33.70 (-0.07) |
+
+## Per language
+
+### belebele (acc)
+
+| run | burmese | fil | indo | khmer | malay | thai | vie |
+|---|---|---|---|---|---|---|---|
+| base | 28.20 | 27.20 | 27.80 | 25.60 | 28.20 | 27.00 | 27.40 |
+| random_50M_7languages_ep1_seed42 | 25.20 | 26.20 | 26.40 | 22.20 | 27.60 | 27.60 | 25.80 |
+| edu_50M_7languages_ep1_seed42 | 24.60 | 25.60 | 27.00 | 22.60 | 27.60 | 26.20 | 24.00 |
+| cult_50M_7languages_ep1_seed42 | 25.60 | 27.80 | 26.60 | 24.60 | 30.00 | 25.40 | 24.40 |
+| avg5_50M_7languages_ep1_seed42 | 24.60 | 25.40 | 26.40 | 24.80 | 26.80 | 24.80 | 25.20 |
+| rr5_50M_7languages_ep1_seed42 | 25.00 | 24.80 | 26.60 | 24.20 | 29.00 | 26.40 | 24.40 |
+
+### global_piqa (acc_norm)
+
+| run | fil | indo | malay | thai | vie |
+|---|---|---|---|---|---|
+| base | 54.74 | 66.32 | 50.53 | 57.89 | 66.32 |
+| random_50M_7languages_ep1_seed42 | 54.74 | 67.37 | 53.68 | 56.84 | 67.37 |
+| edu_50M_7languages_ep1_seed42 | 56.84 | 67.37 | 55.79 | 57.89 | 66.32 |
+| cult_50M_7languages_ep1_seed42 | 56.84 | 67.37 | 54.74 | 57.89 | 63.16 |
+| avg5_50M_7languages_ep1_seed42 | 56.84 | 68.42 | 52.63 | 58.95 | 66.32 |
+| rr5_50M_7languages_ep1_seed42 | 53.68 | 68.42 | 53.68 | 57.89 | 66.32 |
+
+### global_mmlu (acc)
+
+| run | fil | indo | malay | vie |
+|---|---|---|---|---|
+| base | 23.17 | 25.50 | 24.17 | 23.67 |
+| random_50M_7languages_ep1_seed42 | 21.33 | 24.67 | 24.17 | 24.50 |
+| edu_50M_7languages_ep1_seed42 | 22.50 | 24.17 | 22.67 | 25.83 |
+| cult_50M_7languages_ep1_seed42 | 21.50 | 23.83 | 23.00 | 23.00 |
+| avg5_50M_7languages_ep1_seed42 | 22.33 | 23.33 | 24.00 | 25.67 |
+| rr5_50M_7languages_ep1_seed42 | 22.33 | 25.00 | 23.50 | 25.00 |
+
+### include (acc)
+
+| run | fil | indo | malay | vie |
+|---|---|---|---|---|
+| base | 21.82 | 24.22 | 25.40 | 24.22 |
+| random_50M_7languages_ep1_seed42 | 28.48 | 24.40 | 22.18 | 27.16 |
+| edu_50M_7languages_ep1_seed42 | 24.85 | 24.59 | 25.20 | 27.16 |
+| cult_50M_7languages_ep1_seed42 | 27.27 | 24.40 | 23.39 | 26.61 |
+| avg5_50M_7languages_ep1_seed42 | 29.09 | 23.67 | 23.59 | 27.71 |
+| rr5_50M_7languages_ep1_seed42 | 26.67 | 23.85 | 22.38 | 27.34 |
+
+### sib200 (acc)
+
+| run | burmese | fil | indo | khmer | malay | thai | vie |
+|---|---|---|---|---|---|---|---|
+| base | 62.25 | 68.63 | 72.06 | 65.20 | 73.53 | 72.55 | 75.00 |
+| random_50M_7languages_ep1_seed42 | 64.71 | 67.65 | 69.61 | 65.69 | 68.63 | 67.65 | 72.55 |
+| edu_50M_7languages_ep1_seed42 | 64.22 | 67.65 | 71.57 | 68.63 | 75.49 | 70.10 | 72.06 |
+| cult_50M_7languages_ep1_seed42 | 65.20 | 67.65 | 72.55 | 67.65 | 72.55 | 71.08 | 72.06 |
+| avg5_50M_7languages_ep1_seed42 | 63.24 | 68.14 | 73.04 | 66.18 | 74.02 | 69.61 | 75.49 |
+| rr5_50M_7languages_ep1_seed42 | 64.71 | 68.14 | 71.57 | 67.65 | 74.02 | 71.57 | 74.02 |
+
+### sea_nli_normal (acc)
+
+| run | burmese | fil | indo | khmer | malay | thai | vie |
+|---|---|---|---|---|---|---|---|
+| base | 31.62 | 33.65 | 34.02 | 29.73 | 33.03 | 33.62 | 33.10 |
+| random_50M_7languages_ep1_seed42 | 31.62 | 33.65 | 35.68 | 29.73 | 32.11 | 33.62 | 33.10 |
+| edu_50M_7languages_ep1_seed42 | 31.62 | 34.62 | 34.02 | 29.73 | 33.03 | 34.48 | 33.10 |
+| cult_50M_7languages_ep1_seed42 | 31.62 | 33.65 | 34.85 | 29.73 | 33.03 | 33.19 | 33.10 |
+| avg5_50M_7languages_ep1_seed42 | 31.62 | 33.65 | 34.02 | 29.73 | 33.03 | 33.62 | 33.10 |
+| rr5_50M_7languages_ep1_seed42 | 31.62 | 33.65 | 34.02 | 29.73 | 33.03 | 34.05 | 33.10 |
+
+### sea_nli_hard (acc)
+
+| run | burmese | fil | indo | khmer | malay | thai | vie |
+|---|---|---|---|---|---|---|---|
+| base | 41.03 | 52.21 | 53.24 | 50.00 | 43.42 | 55.14 | 62.32 |
+| random_50M_7languages_ep1_seed42 | 41.03 | 52.21 | 53.24 | 50.00 | 46.05 | 56.07 | 62.32 |
+| edu_50M_7languages_ep1_seed42 | 41.03 | 52.21 | 53.24 | 50.00 | 43.42 | 55.14 | 62.32 |
+| cult_50M_7languages_ep1_seed42 | 41.03 | 52.21 | 53.96 | 50.00 | 46.05 | 56.07 | 62.32 |
+| avg5_50M_7languages_ep1_seed42 | 41.03 | 52.21 | 53.24 | 50.00 | 43.42 | 56.07 | 62.32 |
+| rr5_50M_7languages_ep1_seed42 | 41.03 | 52.21 | 53.24 | 50.00 | 43.42 | 56.07 | 62.32 |
+

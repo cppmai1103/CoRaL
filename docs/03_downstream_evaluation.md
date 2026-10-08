@@ -1,350 +1,139 @@
-# SEA-Rater: Downstream Evaluation Without Fine-Tuning
+# Evaluation Benchmark Plan Using `lm-evaluation-harness`
 
-Protocol date: 2026-10-02
+## Evaluation objective
 
-## 1. Objective and scope
+The project evaluates multilingual continual-pretraining and data-selection methods for seven Southeast Asian languages: Burmese, Filipino, Indonesian, Khmer, Malay, Thai, and Vietnamese.
 
-Evaluate whether SEA-Rater data selection or quality-weighted training improves a pretrained causal language model's reading comprehension, causal reasoning, topic classification, and culturally grounded inference.
+The benchmark suite is selected using three criteria:
 
-Use our own evaluation code for all four benchmarks. Keep the pretrained model parameters fixed: no task fine-tuning, classification-head training, or gradient updates. The main setting is zero-shot candidate-likelihood scoring.
+1. Language coverage across the seven target languages.
+2. Simple, reproducible tasks that are suitable for base language models.
+3. Coverage of different abilities, including comprehension, knowledge, and reasoning.
 
-This document specifies a proposed SEA-Rater evaluation protocol. The illustrative prompts are custom templates, not exact reproductions of each benchmark's published evaluation setup. Record and release the final templates and scoring rules with the results.
+## Selected five-benchmark suite
 
-## 2. Benchmarks
+The primary evaluation uses the following five benchmarks:
 
-| Benchmark | Task | Languages in this project | Main reporting |
-|---|---|---|---|
-| Belebele | Reading comprehension with four answer choices | Indonesian, Malay, Tagalog, Thai, Khmer, Vietnamese | Accuracy |
-| XCOPA | Choose one of two plausible causes or effects | Indonesian, Thai, Vietnamese | Accuracy |
-| SIB-200 | Classify text into seven topics | Indonesian, Malay, Tagalog, Thai, Khmer, Vietnamese | Accuracy and macro-F1 |
-| SEA-NLI | Classify a culturally grounded premise–hypothesis relationship | Indonesian, Malay, Tagalog, Thai, Khmer, Vietnamese | Accuracy and macro-F1; additionally weighted-F1 |
+| Benchmark | Main ability | Available project languages | Primary harness task(s) | Main metric | Final evaluation set |
+| --- | --- | --- | --- | --- | --- |
+| Belebele | Reading comprehension | Burmese, Filipino, Indonesian, Khmer, Malay, Thai, Vietnamese | `belebele_{lang}` | `acc`, `acc_norm` | Full official test set |
+| Global PIQA | Cultural and physical commonsense reasoning | Filipino, Indonesian, Malay, Thai, Vietnamese | `global_piqa_{split}_cloze_{lang}` | `acc`, `acc_norm`, `acc_bytes` | Official test split |
+| Global-MMLU Full | Broad academic knowledge and reasoning | Filipino, Indonesian, Malay, Vietnamese | `global_mmlu_full_{lang}` | `acc` | Full test split |
+| INCLUDE | Regional knowledge and academic reasoning | Filipino, Indonesian, Malay, Vietnamese | `include_base_44_{lang}` | `acc` | Full INCLUDE-base test set |
+| XCOPA | Causal commonsense reasoning | Indonesian, Thai, Vietnamese | `xcopa_{lang}` | `acc` | Full test split |
 
-Use the official test splits. Belebele has 900 questions per language, XCOPA has 500 test questions per language, and SIB-200 has 204 test examples per language. SEA-NLI's language subsets differ in size; record their actual counts and report its normal and hard subsets separately. The SEA-NLI paper reports weighted-F1. See the primary sources in Section 10.
+The five benchmarks should be evaluated using their complete official evaluation sets. The number of examples should not be artificially equalized across datasets.
 
-Uniform random guessing gives 25% accuracy for Belebele, 50% for XCOPA, about 14.3% for SIB-200, and about 33.3% for three-label SEA-NLI. Also report majority-class accuracy for the classification datasets: exceeding uniform random guessing alone can be misleading when classes are imbalanced.
+## Evaluation protocol with k-shot prompting
 
-## 3. One common example format
+`lm-evaluation-harness` supports k-shot evaluation through:
 
-Each dataset adapter produces the same structure:
-
-```python
-example = {
-    "example_id": "unique_dataset_example_id",
-    "language": "vie",
-    "prompt": "...",
-    "choices": ["candidate 1", "candidate 2", "..."],
-    "gold_index": 0,
-}
+```bash
+lm-eval run \
+  --model hf \
+  --model_args pretrained=<checkpoint> \
+  --tasks <task_names> \
+  --num_fewshot 5 \
+  --batch_size auto \
+  --log_samples
 ```
 
-Use zero-based indices. The gold index is used only after prediction to calculate metrics; it must never enter the model prompt.
+Here, `--num_fewshot 5` adds five labeled demonstrations to every test prompt. It does not mean that only five test examples are evaluated. The model is scored on every example in the official test split unless `--limit` or `--samples` is explicitly used.
+
+The evaluation procedure is:
+
+1. Train each model size and data-selection method under the same token budget.
+2. Evaluate every checkpoint on the same benchmark tasks and language configurations.
+3. Add the same number of demonstrations to each test prompt for a k-shot run.
+4. Evaluate the complete official test split.
+5. Save model inputs and outputs with `--log_samples` for verification.
+6. Report results separately for every language and benchmark.
+
+The recommended main experiment is 0-shot for the cleanest comparison of data-selection methods. A 5-shot experiment can be reported as a secondary robustness analysis.
+
+### Demonstration sources
+
+Demonstrations must come from a separate training, development, or validation pool whenever possible. The final test examples must only be used for scoring.
+
+| Benchmark | Recommended demonstration source |
+| --- | --- |
+| Belebele | A separate English task-training pool, following the original benchmark protocol; otherwise use 0-shot or a custom demonstration split |
+| Global PIQA | A separate fixed demonstration pool; the current task configuration does not provide a clean train/dev split, so 0-shot is safer |
+| INCLUDE | A separate fixed demonstration pool; the current task configuration is test-only, so 0-shot is safer unless a custom split is created |
+| Global-MMLU Full | `dev` split |
+| XCOPA | `validation` split |
+
+## Metrics and aggregation
+
+For each model, method, benchmark, and language, report the official harness metric. The main results should include:
+
+- Per-language scores.
+- Macro-average across available languages within each benchmark.
+- An overall macro-average across the five selected benchmarks.
+- The number of evaluated examples for every benchmark-language pair.
+- The difference from the random-selection baseline when comparing data-selection methods.
+
+Do not pool all examples from all benchmarks into one accuracy score, because larger datasets would dominate the result. Use the same test examples for every model and method so that differences are directly comparable.
+
+For languages that are not supported by a benchmark, report `N/A` and clearly state the coverage. Do not replace missing languages with translated or unofficial versions without defining a separate experiment.
+
+## Reproducibility checklist
+
+- Pin the `lm-evaluation-harness` version or commit.
+- Record the exact task names and task configurations.
+- Record the benchmark version and evaluation split.
+- Record the model checkpoint and tokenizer.
+- Record `num_fewshot`, prompt format, and random seeds.
+- Do not use `--limit` or an arbitrary subset for the final results.
+- Keep the final test set separate from method, checkpoint, and hyperparameter selection.
+
+## Section 1: Comprehensive benchmark inventory
+
+This section is intentionally kept at the end so that additional benchmarks can be added later without changing the main evaluation protocol. The first table records benchmark availability and harness details; the second table records the main ability measured by each benchmark.
+
+### 1.1 Benchmark availability and harness information
+
+| Dataset          | Harness task(s)                                 | Metric(s)                                                        | Burmese | Filipino | Indonesian | Khmer | Malay | Thai | Vietnamese | # Languages |
+| ---------------- | ----------------------------------------------- | ---------------------------------------------------------------- | ------- | -------- | ---------- | ----- | ----- | ---- | ---------- | ----------- |
+| Belebele         | `belebele_{lang}`                               | `acc`, `acc_norm`                                                | ✓       | ✓        | ✓          | ✓     | ✓     | ✓    | ✓          | **7**       |
+| Global PIQA      | `global_piqa_{split}_{format}_{lang}`           | Cloze: `acc`, `acc_norm`, `acc_bytes`; Generation: `exact_match` |         | ✓        | ✓          |       | ✓     | ✓    | ✓          | **5**       |
+| Global-MMLU      | `global_mmlu_{lang}`; `global_mmlu_full_{lang}` | `acc`                                                            |         | ✓        | ✓          |       | ✓     |      | ✓          | **4**       |
+| INCLUDE          | `include_base_44_{lang}`; few-shot variants     | `acc`                                                            |         | ✓        | ✓          |       | ✓     |      | ✓          | **4**       |
+| MMLU-ProX        | `mmlu_prox_{lang}`; `mmlu_prox_lite_{lang}`     | `exact_match`                                                    |         |          | ✓          |       |       | ✓    | ✓          | **3**       |
+| XCOPA            | `xcopa_id`, `xcopa_th`, `xcopa_vi`              | `acc`                                                            |         |          | ✓          |       |       | ✓    | ✓          | **3**       |
+| Okapi ARC        | `arc_id`, `arc_vi`                              | `acc`, `acc_norm`                                                |         |          | ✓          |       |       |      | ✓          | **2**       |
+| Okapi HellaSwag  | `hellaswag_id`, `hellaswag_vi`                  | `acc`, `acc_norm`                                                |         |          | ✓          |       |       |      | ✓          | **2**       |
+| Okapi MMLU       | `m_mmlu_id`, `m_mmlu_vi`                        | `acc`                                                            |         |          | ✓          |       |       |      | ✓          | **2**       |
+| Okapi TruthfulQA | `truthfulqa_{id,vi}_{mc1,mc2}`                  | `acc`                                                            |         |          | ✓          |       |       |      | ✓          | **2**       |
+| XNLI             | `xnli_th`, `xnli_vi`                            | `acc`                                                            |         |          |            |       |       | ✓    | ✓          | **2**       |
+| XQuAD            | `xquad_th`, `xquad_vi`                          | `exact_match`, `F1`                                              |         |          |            |       |       | ✓    | ✓          | **2**       |
+| XStoryCloze      | `xstorycloze_my`, `xstorycloze_id`              | `acc`                                                            | ✓       |          | ✓          |       |       |      |            | **2**       |
+| COPAL-ID         | `copal_id_standard`, `copal_id_colloquial`      | `acc`                                                            |         |          | ✓          |       |       |      |            | **1**       |
+| MGSM             | `mgsm_direct_th`; native/en COT variants        | `exact_match`                                                    |         |          |            |       |       | ✓    |            | **1**       |
+| MLQA             | `mlqa_{context-lang}_{question-lang}`           | `exact_match`, `F1`                                              |         |          |            |       |       |      | ✓          | **1**       |
+| MMMLU (OpenAI)   | `mmmlu_id_id` and subject tasks                 | `acc`, `acc_norm`                                                |         |          | ✓          |       |       |      |            | **1**       |
+| TyDiQA           | `tydiqa_goldp_id`                               | `exact_match`, `F1`                                              |         |          | ✓          |       |       |      |            | **1**       |
+
+### 1.2 Main model ability tested
+
+| Dataset          | Main model ability                        | What it mainly tests                                                            |
+| ---------------- | ----------------------------------------- | ------------------------------------------------------------------------------- |
+| Belebele         | Reading comprehension                     | Understanding a passage and answering questions based on it                     |
+| Global PIQA      | Cultural commonsense reasoning            | Choosing plausible solutions using everyday and local cultural knowledge        |
+| Global-MMLU      | Broad academic knowledge and reasoning    | Knowledge across many academic subjects, including cultural sensitivity         |
+| INCLUDE          | Regional knowledge and academic reasoning | Academic/professional exam knowledge and local regional understanding           |
+| MMLU-ProX        | Advanced academic reasoning               | Multi-step reasoning across 14 academic subjects and languages                  |
+| XCOPA            | Causal commonsense reasoning              | Identifying plausible causes and effects                                        |
+| Okapi ARC        | Scientific knowledge and reasoning        | Answering elementary science questions                                          |
+| Okapi HellaSwag  | Situational commonsense reasoning         | Selecting the most plausible continuation of a situation                        |
+| Okapi MMLU       | Broad academic knowledge                  | Multiple-choice knowledge and reasoning across academic subjects                |
+| Okapi TruthfulQA | Truthfulness and factuality               | Avoiding false, misleading, or common-misconception answers                     |
+| XNLI             | Natural-language inference                | Determining entailment, contradiction, or neutrality between sentences          |
+| XQuAD            | Extractive reading comprehension          | Finding the correct answer span in a passage                                    |
+| XStoryCloze      | Narrative understanding                   | Predicting the most coherent ending of a short story                            |
+| COPAL-ID         | Causal and cultural commonsense reasoning | Causal reasoning involving Indonesian local language and culture                |
+| MGSM             | Mathematical reasoning                    | Solving multilingual grade-school math problems, often requiring multiple steps |
+| MLQA             | Cross-lingual question answering          | Understanding passages and extracting answers across languages                  |
+| MMMLU            | Broad academic knowledge and reasoning    | 57 multiple-choice academic subjects in multiple languages                      |
+| TyDiQA           | Information-seeking question answering    | Finding answer spans in passages for factual questions                          |
 
-The evaluation code supplies every candidate. The model does not have to generate its own candidate list or produce a free-form answer.
-
-### Should choices appear in the prompt?
-
-| Scoring format | Choice-list requirement |
-|---|---|
-| Score the full candidate answer text | A list in the shared prompt is optional; the evaluator already has the candidates. |
-| Score answer letters such as A/B/C/D | The prompt must provide the mapping from letters to answers. |
-
-For this protocol, score full answer texts for Belebele and XCOPA, and label texts for SIB-200 and SEA-NLI. Include the topic list for SIB-200 and label definitions for SEA-NLI. Listing possible labels does not make an evaluation few-shot: no labeled demonstrations have been provided.
-
-## 4. Prompt and candidate examples
-
-All examples below are invented illustrations in English, not real benchmark test items. For the actual experiments, use each benchmark's target-language text and fixed, checked prompt and label translations. Preserve a mapping from translated labels to the original categories.
-
-### 4.1 Belebele: passage and question
-
-Shared prompt:
-
-```text
-Passage:
-Lan visited the library on Saturday to borrow history books.
-Afterwards, she returned home to read.
-
-Question: Why did Lan visit the library?
-Answer:
-```
-
-Candidates held by the evaluator:
-
-```python
-choices = [
-    "to borrow history books",
-    "to meet her teacher",
-    "to buy food",
-    "to play sports",
-]
-gold_index = 0
-```
-
-Include the passage as well as the question. In this custom answer-text format, the four choices are not listed inside the shared prompt.
-
-### 4.2 XCOPA: cause or effect
-
-For a question asking for a cause, use a cue equivalent to “because.”
-
-```text
-The road was wet because
-```
-
-```python
-choices = [
-    "it had just rained.",
-    "the sun was shining.",
-]
-gold_index = 0
-```
-
-For a question asking for an effect, use a cue equivalent to “so.”
-
-```text
-It rained heavily, so
-```
-
-```python
-choices = [
-    "the road became wet.",
-    "the road dried quickly.",
-]
-gold_index = 0
-```
-
-Read the cause/effect field from each dataset record. Use grammatically appropriate language-specific connectors and consistent punctuation handling.
-
-### 4.3 SIB-200: topic classification
-
-Shared prompt:
-
-```text
-Topics: science/technology, travel, politics, sports,
-health, entertainment, geography.
-
-Text:
-The Vietnamese team won the final after a penalty shootout.
-
-Topic:
-```
-
-```python
-choices = [
-    "science/technology",
-    "travel",
-    "politics",
-    "sports",
-    "health",
-    "entertainment",
-    "geography",
-]
-gold_index = 3
-```
-
-These are the seven original topic categories. For Vietnamese, for example, “thể thao” maps to “sports.” Use the same label wording and order for every checkpoint evaluated in a given language.
-
-### 4.4 SEA-NLI: culturally grounded inference
-
-Shared prompt:
-
-```text
-Assume the premise is true. Classify the hypothesis:
-- entailment: the hypothesis follows from the premise.
-- contradiction: the hypothesis conflicts with the premise.
-- neutral: the premise does not determine whether it is true.
-
-Premise: Nam brought bánh chưng to the family gathering.
-Hypothesis: Nam brought food to the family gathering.
-
-Relationship:
-```
-
-```python
-choices = [
-    "entailment",
-    "contradiction",
-    "neutral",
-]
-gold_index = 0
-```
-
-The intended label is entailment, using the knowledge that bánh chưng is food. Neutral means insufficient information, not that the hypothesis is false.
-
-For real SEA-NLI records, use the native-language premise and hypothesis fields for the main experiment. Do not include the gold label, explanatory reasoning, cultural concept description, or other answer-supporting metadata in the prompt. Classify each premise–hypothesis pair separately.
-
-## 5. Calculate candidate likelihood
-
-For prompt $x$ and candidate answer $a_j$ containing $m_j$ tokens:
-
-$$
-s_j = \log P_\theta(a_j\mid x)
-    = \sum_{t=1}^{m_j}\log P_\theta(a_{j,t}\mid x,a_{j,<t}).
-$$
-
-Each answer token is conditioned on the shared prompt and preceding answer tokens. Select:
-
-$$
-\hat y = \operatorname*{arg\,max}_j s_j.
-$$
-
-For the Belebele example, suppose the following illustrative scores are obtained:
-
-| Candidate | Summed log-probability |
-|---|---:|
-| to borrow history books | **−3.2** |
-| to meet her teacher | −5.8 |
-| to buy food | −6.1 |
-| to play sports | −7.4 |
-
-The largest value is −3.2, so the prediction is index 0. It matches the gold index and contributes one correct prediction.
-
-There is no need to exponentiate the scores or normalize them across candidates to identify the winner. Use a fixed tie-breaking rule and log ties, particularly during initial implementation checks.
-
-### Primary and optional scoring rules
-
-Use summed log-probability as the primary rule in this initial custom protocol. Longer answers can receive lower scores partly because they contain more tokens.
-
-An optional sensitivity analysis uses mean log-probability per answer token:
-
-$$
-s_j^{\mathrm{mean}} = \frac{s_j}{m_j}.
-$$
-
-This can change the selected answer; it is a separate scoring variant, not a transformation of the final accuracy. Label the two variants explicitly. Choose the primary rule before examining test results. Per-token normalization also does not remove all biases from label frequency or wording.
-
-## 6. Evaluation loop and implementation checks
-
-The following is pseudocode, not a complete executable evaluator:
-
-```python
-predictions = []
-gold_labels = []
-records = []
-
-for example in dataset:
-    # loglikelihood scores continuation tokens only.
-    scores = [
-        loglikelihood(model, tokenizer, example["prompt"], candidate)
-        for candidate in example["choices"]
-    ]
-    prediction = argmax(scores)
-
-    predictions.append(prediction)
-    gold_labels.append(example["gold_index"])
-    records.append({
-        "example_id": example["example_id"],
-        "language": example["language"],
-        "gold_index": example["gold_index"],
-        "prediction": prediction,
-        "candidate_scores": scores,
-    })
-```
-
-Inside the likelihood scorer:
-
-1. Set `model.eval()` and disable gradient computation, for example with `torch.inference_mode()`.
-2. Combine the prompt, a fixed separator, and the candidate with an explicit tokenization policy. Verify the prompt–continuation boundary; tokenizing the strings separately and concatenating their IDs is not automatically identical to tokenizing the combined text.
-3. Obtain token logits and apply log-softmax over the vocabulary.
-4. Align logits with the next token: logits at position $t-1$ score the token at position $t$.
-5. Gather the log-probability assigned to each actual candidate token.
-6. Mask out all prompt and padding positions and sum over candidate tokens only. The first candidate token must still be included.
-7. Preserve identical prompt context across candidates. If truncation is necessary, reserve space for the longest candidate and apply one documented truncation policy. Record truncation counts by task and language.
-8. Use consistent BOS/EOS and delimiter handling. Do not accidentally add an EOS token to only some candidates or double-shift targets when using a model's built-in loss.
-
-Score candidate sequences in batches for efficiency. Batching must not change token masks, context, or scores beyond ordinary numerical tolerance.
-
-The causal model can receive a candidate's tokens to calculate its likelihood without receiving the gold answer label. The causal attention mask ensures that a token is predicted from preceding tokens; the evaluator repeats this operation for every candidate.
-
-Before a full run, inspect a few rendered examples and confirm correct label mapping, inclusion of all answer tokens, and agreement between batched and individual scoring.
-
-## 7. Calculate metrics
-
-### Accuracy
-
-$$
-\mathrm{Accuracy} = \frac{1}{N}\sum_{i=1}^{N}\mathbf{1}[\hat y_i=y_i].
-$$
-
-Multiply by 100 to report a percentage. For example, 315 correct answers out of 900 gives 35% accuracy.
-
-### Macro-F1
-
-For class $c$:
-
-$$
-F1_c = \frac{2TP_c}{2TP_c+FP_c+FN_c}.
-$$
-
-Then average equally over the fixed label set:
-
-$$
-\mathrm{MacroF1} = \frac{1}{C}\sum_{c=1}^{C}F1_c.
-$$
-
-Use seven classes for SIB-200 and three for SEA-NLI. Specify the behavior for undefined class scores, such as zero with `zero_division=0`, and report class support counts.
-
-### Weighted-F1
-
-For comparison with the SEA-NLI paper, also calculate:
-
-$$
-\mathrm{WeightedF1} = \sum_{c=1}^{C}\frac{n_c}{N}F1_c,
-$$
-
-where $n_c$ is the number of gold examples in class $c$. Weighted-F1 weights classes by support; macro-F1 weights classes equally. A different prompt or likelihood-scoring protocol still prevents treating our results as an exact reproduction of published scores.
-
-## 8. Compare SEA-Rater training methods
-
-Evaluate the pretrained checkpoints from Random, Educational-value selection, Avg4, Avg5, and quality-weighted-loss training. Use the same benchmark questions, prompt templates, label translations, tokenizer, context policy, and scoring rule across comparable checkpoints. Compare checkpoints at matched training budgets.
-
-Report:
-
-- Scores for every language.
-- A separate macro-average across languages for each benchmark and metric.
-- Normal and hard SEA-NLI results separately.
-- Mean and sample standard deviation across the three pretraining seeds.
-- Improvements over the Random baseline in percentage points.
-- Paired confidence intervals for the principal method comparisons where feasible.
-
-The language macro-average is:
-
-$$
-\mathrm{LanguageMacro} = \frac{1}{L}\sum_{\ell=1}^{L}M_\ell.
-$$
-
-This differs from macro-F1: the former averages languages, while the latter averages classes. Do not merge the four benchmarks into one unqualified accuracy number.
-
-For paired uncertainty estimates, compare methods on the same examples. Account for shared passages and parallel translations when resampling Belebele, and shared premises/concepts where applicable in SEA-NLI. Training-seed variation and test-sample uncertainty describe different sources of variation.
-
-Use this results-table structure once per benchmark, metric, and subset:
-
-| Training method | Indonesian | Malay | Tagalog | Thai | Khmer | Vietnamese | Language macro |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Random | | | | | | | |
-| Educational value | | | | | | | |
-| Avg4 | | | | | | | |
-| Avg5 | | | | | | | |
-| Quality-weighted loss | | | | | | | |
-
-For XCOPA, mark unsupported language cells as N/A and average only Indonesian, Thai, and Vietnamese. Fill cells with mean ± standard deviation across pretraining seeds.
-
-## 9. Reproducibility and interpretation
-
-Save per-example predictions and candidate scores, along with model checkpoint, training seed, dataset revision, subset, prompt version, translated label mapping, tokenizer revision, scoring rule, and truncation policy.
-
-Keep benchmark test examples out of pretraining and data-weight optimization. Select prompts, hyperparameters, and checkpoints using development data or a previously fixed rule, not final benchmark test scores.
-
-Zero-shot is the main protocol. If few-shot evaluation is added later, put demonstrations in the prompt without changing model weights. Use non-test examples, identical demonstrations across compared models, and check source-passage overlap across benchmarks before constructing demonstrations. Belebele and SIB-200 both use FLORES-derived material.
-
-A small LM can remain near chance on prompted tasks. Report that outcome honestly; these evaluations do not guarantee a usable task capability. Consistent improvements over Random across languages and seeds provide evidence for the data method. An Avg5 improvement on general benchmarks alone does not establish cultural understanding; SEA-NLI provides a more targeted, still limited test.
-
-## 10. Primary sources
-
-- [Belebele dataset and task description](https://huggingface.co/datasets/facebook/belebele)
-- [XCOPA dataset and task description](https://huggingface.co/datasets/cambridgeltl/xcopa)
-- [SIB-200 dataset, labels, and splits](https://huggingface.co/datasets/Davlan/sib200)
-- [SIB-200 paper](https://aclanthology.org/2024.eacl-long.14/)
-- [SEA-NLI dataset and field descriptions](https://huggingface.co/datasets/aisingapore/SEA-NLI)
-- [SEA-NLI paper: task definition, subsets, and weighted-F1 reporting](https://arxiv.org/html/2606.03284v1)
-- [lm-evaluation-harness model guide: conditional continuation likelihood and causal alignment](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/model_guide.md)
-
-Dataset facts come from these sources. The custom prompt examples, combined evaluation design, and recommended reporting procedure are the proposed SEA-Rater protocol discussed in this project.

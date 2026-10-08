@@ -50,7 +50,7 @@ _<N>Mtok suffix when --select-by tokens):
     summary.json    per-language pool size, selected count, token totals (and scores for top-score;
                     target vs. actual tokens for --select-by tokens)
     summary.md      the same as a table
-Train on the result with:  METHOD=<output folder name> sbatch sh/train_gpt2.sh
+Train on the result with:  METHOD=<output folder name> sbatch sh/train/train_gpt2.sh
 """
 
 import argparse

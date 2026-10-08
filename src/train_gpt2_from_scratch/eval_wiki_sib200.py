@@ -46,6 +46,20 @@ starts with the model's own BOS token when it has one (Gemma is trained with <bo
 EOS), and the window is capped at --max-context tokens. Results go to
 checkpoints/hub_models/<model name>/wiki_sib200_eval/. Gated models (Gemma) need HF_TOKEN.
 
+Human-annotated documents (--datasets annotated; --annotated-table, default the 7-language
+data/rater_dataset_7languages/document_table.csv, ~970 documents/language, none of them in the LoRA training pool
+data/pilot_corpus_7languages): every document is scored once, as above, and reported twice -- "annotated" over all
+documents and "annotated_hq" over the high-quality part only (--datasets annotated_hq scores only that part), the top --hq-fraction (default 50%) of each language by
+the human --hq-by score (default avg5, the mean of the 5 dimensions; score_annotated_dataset.select_high_quality).
+Several --hq-by scores give one high-quality result each, e.g. --hq-by avg5 cleanliness -> annotated_hq and
+annotated_hq_cleanliness (cleanliness is skewed to the top scores: its 50% cutoff splits a tie by doc_id).
+Per-document rows go to <out-dir>/annotated/<language>.csv, topic = high_quality / other.
+
+The Wikipedia sample is drawn once and saved under --wikipedia-cache-dir (default data/eval_sets/, one JSONL per
+language, named after the seed, sample size and --pilot-corpus-dir), so every model scores the same articles and GPU
+jobs run offline; draw it on the login node first with --prepare-only. For the 7-language LoRA runs see
+sh/pipelines/submit_ppl_7languages.sh (--pilot-corpus-dir data/pilot_corpus_7languages).
+
 Run from the project root (GPU recommended; Wikipedia download is ~1.85GB total across the 6
 languages, cached under --cache-dir after the first run). Requires torch, transformers,
 huggingface_hub, pyarrow, pandas:
@@ -129,8 +143,32 @@ def load_pilot_corpus_hashes(language: str, pilot_corpus_dir: Path) -> set[str]:
     return set(pd.read_csv(path, usecols=["text_hash"])["text_hash"])
 
 
+def wikipedia_sample_path(cache_dir: Path, language: str, seed: int, num_samples: int, pilot_corpus_dir: Path,
+                          min_chars: int) -> Path:
+    return cache_dir / (f"wikipedia_{WIKIPEDIA_LANGUAGES[language]}_{WIKIPEDIA_REVISION}_n{num_samples}_seed{seed}_"
+                        f"min{min_chars}_excl-{pilot_corpus_dir.name}.jsonl")
+
+
 def load_wikipedia(language: str, seed: int, num_samples: int, pilot_corpus_dir: Path,
-                   min_chars: int) -> list[dict]:
+                   min_chars: int, cache_dir: Path | None = None) -> list[dict]:
+    """The sampled articles; with `cache_dir`, read from / written to a JSONL file there, so the sample is drawn once
+    (on a node with network: the Hub file listing needs it) and every later model scores exactly these articles."""
+    path = wikipedia_sample_path(cache_dir, language, seed, num_samples, pilot_corpus_dir, min_chars) \
+        if cache_dir else None
+    if path and path.is_file():
+        with path.open(encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+    examples = sample_wikipedia(language, seed, num_samples, pilot_corpus_dir, min_chars)
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            f.writelines(json.dumps(ex, ensure_ascii=False) + "\n" for ex in examples)
+        print(f"  [wikipedia/{language}] wrote {len(examples)} sampled articles to {path}", flush=True)
+    return examples
+
+
+def sample_wikipedia(language: str, seed: int, num_samples: int, pilot_corpus_dir: Path,
+                     min_chars: int) -> list[dict]:
     import pandas as pd
     from huggingface_hub import HfApi, hf_hub_download
 
@@ -187,6 +225,75 @@ def load_sib200_text(language: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
+# Human-annotated SEA-Rater documents: all, and the high-quality part by the human scores
+# --------------------------------------------------------------------------
+
+def hq_dataset(hq_by: str) -> str:
+    """Result name of one high-quality definition: annotated_hq for avg5 (the original one), else annotated_hq_<by>."""
+    return "annotated_hq" if hq_by == "avg5" else f"annotated_hq_{hq_by}"
+
+
+def load_annotated(table: Path, languages: list[str], hq_by: list[str], hq_fraction: float) -> list[dict]:
+    """Every document of the annotated table in `languages`. `high_quality` lists the `hq_by` scores for which the
+    document is in the top `hq_fraction` of its language (score_annotated_dataset.select_high_quality: ties at the
+    cutoff broken by doc_id, documents missing that score never high quality); `topic` is the same list joined with
+    "+" ("other" if empty), for the per-document CSVs."""
+    from src.train_gpt2_from_scratch.score_annotated_dataset import (compute_importance_scores, load_table,
+                                                                     select_high_quality)
+    rows = [r for r in load_table(table) if r["language"] in languages]
+    scores = compute_importance_scores(rows)
+    kept = {}
+    for by in hq_by:
+        per_language, _ = select_high_quality(scores, hq_fraction, by)
+        kept[by] = set().union(*per_language.values()) if per_language else set()
+    out = []
+    for r in rows:
+        member = [by for by in hq_by if r["doc_id"] in kept[by]]
+        out.append({"example_id": r["doc_id"], "language": r["language"], "text": r["text"], "original_split": "",
+                    "topic": "+".join(f"high_quality_{by}" for by in member) or "other", "source_url": "",
+                    "high_quality": member})
+    return out
+
+
+def run_annotated(model, tokenizer, model_id: str, training_seed, languages: list[str], table: Path,
+                  hq_by: list[str], hq_fraction: float, device, use_bf16: bool, seq_len: int, stride: int,
+                  max_chars: int, out_dir: Path, start_id: int | None = None, hq_only: bool = False) -> list[dict]:
+    """One scoring pass, one result per document set: "annotated" (every document) and one hq_dataset(by) per
+    `hq_by` score (its top `hq_fraction` per language); with `hq_only`, only documents in at least one high-quality
+    set are scored and "annotated" is left out."""
+    examples = load_annotated(table, languages, hq_by, hq_fraction)
+    if hq_only:
+        examples = [e for e in examples if e["high_quality"]]
+    sets = ([] if hq_only else [("annotated", "all", lambda r: True)]) + \
+        [(hq_dataset(by), f"top {hq_fraction:.0%} by {by}", lambda r, by=by: by in r["high_quality"]) for by in hq_by]
+    per_set = {dataset: {} for dataset, _, _ in sets}
+    for language in languages:
+        records = []
+        for ex in progress([e for e in examples if e["language"] == language], desc=f"annotated/{language}",
+                           unit="doc"):
+            nll, n = score_document(model, tokenizer, ex["text"], device, use_bf16, seq_len, stride, max_chars,
+                                    start_id)
+            records.append({**ex, "nll_sum": nll, "valid_target_tokens": n,
+                            "text_bytes": len(ex["text"][:max_chars].encode("utf-8"))})
+        if not records:
+            continue
+        write_predictions(out_dir / "annotated" / f"{language}.csv", model_id, training_seed, "sea-rater-annotated",
+                          table.parent.name, records)
+        for dataset, label, member in sets:
+            g = per_set[dataset][language] = group_loss([r for r in records if member(r)])
+            print(f"  [annotated/{language}, {label}] documents={g['n_documents']} loss={g['loss']:.4f} "
+                  f"perplexity={g['perplexity']:.1f} bits/byte={g['bits_per_byte']:.4f}", flush=True)
+    results = []
+    for (dataset, _, _), by in zip(sets, ([] if hq_only else [None]) + list(hq_by)):
+        per_language = per_set[dataset]
+        results.append({"dataset": dataset, "per_language": per_language,
+                        "macro_loss": statistics.mean(v["loss"] for v in per_language.values()),
+                        "macro_bits_per_byte": statistics.mean(v["bits_per_byte"] for v in per_language.values()),
+                        **({"high_quality": {"by": by, "fraction": hq_fraction}} if by else {})})
+    return results
+
+
+# --------------------------------------------------------------------------
 # Scoring: sliding window so every content token is scored exactly once
 # --------------------------------------------------------------------------
 
@@ -217,13 +324,13 @@ def score_document(model, tokenizer, text: str, device, use_bf16: bool, seq_len:
         attention_mask = torch.ones_like(input_ids)
         with _autocast(device, use_bf16):
             logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-        log_probs = F.log_softmax(logits[0].float(), dim=-1)
-        for rel_t in range(1, len(window)):
-            abs_t = begin + rel_t
-            if abs_t <= scored_until:
-                continue
-            total_nll += -log_probs[rel_t - 1, window[rel_t]].item()
-            total_count += 1
+        # targets are the window positions after what the previous window already scored (abs > scored_until),
+        # each predicted from the position before it
+        first = max(1, scored_until - begin + 1)
+        if first < len(window):
+            total_nll += F.cross_entropy(logits[0, first - 1:-1].float(), input_ids[0, first:],
+                                         reduction="sum").item()
+            total_count += len(window) - first
         scored_until = end - 1
         if end == total:
             break
@@ -261,10 +368,11 @@ def group_loss(records: list[dict]) -> dict:
 
 def run_wikipedia(model, tokenizer, model_id: str, training_seed, languages: list[str], seed: int,
                   num_samples: int, pilot_corpus_dir: Path, min_chars: int, device, use_bf16: bool,
-                  seq_len: int, stride: int, max_chars: int, out_dir: Path, start_id: int | None = None) -> dict:
+                  seq_len: int, stride: int, max_chars: int, out_dir: Path, start_id: int | None = None,
+                  cache_dir: Path | None = None) -> dict:
     per_language = {}
     for language in languages:
-        examples = load_wikipedia(language, seed, num_samples, pilot_corpus_dir, min_chars)
+        examples = load_wikipedia(language, seed, num_samples, pilot_corpus_dir, min_chars, cache_dir)
         records = []
         for ex in progress(examples, desc=f"wikipedia/{language}", unit="doc"):
             nll, n = score_document(model, tokenizer, ex["text"], device, use_bf16, seq_len, stride, max_chars,
@@ -331,12 +439,28 @@ def add_loss_diff(results: list[dict], baseline: list[dict] | None) -> None:
                 v["loss_diff_vs_random"] = v["loss"] - bv["loss"]
 
 
+DATASET_TITLES = {
+    "wikipedia": lambda r: "Wikipedia",
+    "sib200": lambda r: "SIB-200 (pooled per language)",
+    "annotated": lambda r: "Human-annotated documents (all)",
+}
+
+
+def dataset_title(r: dict) -> str:
+    if r["dataset"].startswith("annotated_hq"):
+        hq = r["high_quality"]
+        return (f"Human-annotated documents, high quality (top {hq['fraction']:.0%} per language by human {hq['by']}"
+                + ("; most documents share the top scores, so the cutoff splits a tie by doc_id" if hq["by"] in
+                   ("cleanliness",) else "") + ")")
+    return DATASET_TITLES[r["dataset"]](r)
+
+
 def write_summary(path: Path, results: list[dict]) -> None:
-    lines = ["# Wikipedia / SIB-200 evaluation summary", ""]
+    lines = ["# Perplexity evaluation summary (Wikipedia / SIB-200 / human-annotated documents)", ""]
     for r in results:
-        if r["dataset"] == "wikipedia":
-            lines += ["## Wikipedia", "",
-                     "| Language | Articles | Valid target tokens | Loss | PPL | Bits/byte | Loss vs. baseline |",
+        if r["dataset"] != "sib200":
+            lines += [f"## {dataset_title(r)}", "",
+                     "| Language | Documents | Valid target tokens | Loss | PPL | Bits/byte | Loss vs. baseline |",
                      "| --- | --- | --- | --- | --- | --- | --- |"]
             for lang, v in r["per_language"].items():
                 diff = v.get("loss_diff_vs_random")
@@ -363,19 +487,20 @@ def write_summary(path: Path, results: list[dict]) -> None:
 
 
 def write_comparison(path: Path, run_names: list[str], all_results: dict[str, list[dict]]) -> None:
-    lines = ["# Wikipedia / SIB-200 evaluation: run comparison", "", f"Baseline: `{run_names[0]}`", "",
+    lines = ["# Perplexity evaluation: run comparison", "", f"Baseline: `{run_names[0]}`", "",
              "Loss and PPL are per token: compare them only between models with the same tokenizer. Bits per byte "
              "(lower is better) compares any models, e.g. our GPT-2 runs against a pretrained model.", ""]
     metrics = [("loss", "loss", "{:.4f}", "macro_loss"), ("perplexity", "PPL", "{:.1f}", None),
                ("bits_per_byte", "bits per byte", "{:.4f}", "macro_bits_per_byte")]
-    for dataset in ("wikipedia", "sib200"):
-        if not any(any(x["dataset"] == dataset for x in all_results[name]) for name in run_names):
+    for dataset in dict.fromkeys(x["dataset"] for name in run_names for x in all_results[name]):
+        found = [x for name in run_names for x in all_results[name] if x["dataset"] == dataset]
+        if not found:
             continue
-        languages = sorted({l for name in run_names for x in all_results[name] if x["dataset"] == dataset
-                           for l in x["per_language"]})
+        languages = sorted({l for x in found for l in x["per_language"]})
         for key, label, fmt, macro_key in metrics:
-            lines += [f"## {dataset}: {label}", "", "| Run | " + " | ".join(languages) + " | macro |",
-                     "| --- |" + " --- |" * (len(languages) + 1)]
+            lines += [f"## {dataset_title(found[0])}: {label}", "",
+                      "| Run | " + " | ".join(languages) + " | macro |",
+                      "| --- |" + " --- |" * (len(languages) + 1)]
             for name in run_names:
                 r = next((x for x in all_results[name] if x["dataset"] == dataset), None)
                 if r is None:
@@ -427,8 +552,11 @@ def main():
     parser.add_argument("--model", nargs="+", default=[],
                         help="Pretrained causal LMs: Hugging Face Hub IDs or local model folders, e.g. google/gemma-3-270m")
     parser.add_argument("--max-context", type=int, default=2048, help="--model only: context window cap")
-    parser.add_argument("--datasets", nargs="+", default=["wikipedia", "sib200"], choices=["wikipedia", "sib200"])
-    parser.add_argument("--languages", nargs="+", default=None, help="Default: all 6 project languages")
+    parser.add_argument("--datasets", nargs="+", default=["wikipedia", "sib200"],
+                        choices=["wikipedia", "sib200", "annotated", "annotated_hq"],
+                        help="annotated = the human-annotated documents (--annotated-table), reported for all of them "
+                             "and for the high-quality part; annotated_hq = only the high-quality part is scored")
+    parser.add_argument("--languages", nargs="+", default=None, help="Default: all 7 project languages")
     parser.add_argument("--num-samples", type=int, default=1000, help="Wikipedia articles per language")
     parser.add_argument("--min-chars", type=int, default=200, help="Wikipedia eligibility threshold")
     parser.add_argument("--max-article-chars", type=int, default=50_000,
@@ -437,8 +565,20 @@ def main():
     parser.add_argument("--stride", type=int, default=None, help="Sliding-window stride; default seq_len // 2")
     parser.add_argument("--pilot-corpus-dir", type=Path, default=Path("data/pilot_corpus"),
                         help="Used for the Wikipedia/training-overlap exclusion check")
+    parser.add_argument("--wikipedia-cache-dir", type=Path, default=Path("data/eval_sets"),
+                        help="Sampled Wikipedia articles are saved here (JSONL) and reused by every later run")
+    parser.add_argument("--prepare-only", action="store_true",
+                        help="Only sample and save the Wikipedia articles (login node, needs network); no model")
+    parser.add_argument("--annotated-table", type=Path, default=Path("data/rater_dataset_7languages/document_table.csv"))
+    parser.add_argument("--hq-by", nargs="+", default=["avg5"], choices=["edu", "avg4", "avg5", "educational_value", "reasoning",
+                                                            "professionalism", "cleanliness", "cultural_nuances"],
+                        help="Human score(s) defining high-quality annotated documents; one result per score "
+                             "(annotated_hq for avg5, annotated_hq_<score> otherwise), e.g. --hq-by avg5 cleanliness")
+    parser.add_argument("--hq-fraction", type=float, default=0.5, help="Top fraction per language that is high quality")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--out-dir", type=Path, default=None, help="Default: <run-dir>/wiki_sib200_eval")
+    parser.add_argument("--out-dir", type=Path, default=None, help="Default: <run-dir>/<--out-name>")
+    parser.add_argument("--out-name", default="wiki_sib200_eval",
+                        help="Per-model output folder name, e.g. to keep a Wikipedia-only run apart from another one")
     parser.add_argument("--comparison-file", type=Path, default=None)
     parser.add_argument("--no-bf16", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
@@ -447,22 +587,28 @@ def main():
 
     PROGRESS = not args.no_progress
     use_bf16 = not args.no_bf16
+    languages = args.languages or list(WIKIPEDIA_LANGUAGES)
+    if args.prepare_only:
+        for language in languages:
+            examples = load_wikipedia(language, args.seed, args.num_samples, args.pilot_corpus_dir, args.min_chars,
+                                      args.wikipedia_cache_dir)
+            print(f"  [wikipedia/{language}] {len(examples)} articles ready", flush=True)
+        return
     if not args.run_dir and not args.model:
         parser.error("give at least one --run-dir or --model")
-    languages = args.languages or list(WIKIPEDIA_LANGUAGES)
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     # (name, tokenizer source, model source, default output dir, training seed, is a pretrained Hub/local model)
-    entries = [(d.name, d / "tokenizer", d / "final", d / "wiki_sib200_eval", training_seed_of(d), False)
+    entries = [(d.name, d / "tokenizer", d / "final", d / args.out_name, training_seed_of(d), False)
                for d in args.run_dir]
     for m in args.model:
         local = Path(m)
         if local.name == "final":  # a LoRA run's merged model: name and outputs follow the run
-            entries.append((local.parent.name, m, m, local.parent / "wiki_sib200_eval", training_seed_of(local.parent), True))
+            entries.append((local.parent.name, m, m, local.parent / args.out_name, training_seed_of(local.parent), True))
         else:
             short = m.rstrip("/").split("/")[-1]
-            entries.append((short, m, m, Path("checkpoints/hub_models") / short / "wiki_sib200_eval", "pretrained", True))
+            entries.append((short, m, m, Path("checkpoints/hub_models") / short / args.out_name, "pretrained", True))
     entries = unique_names(entries)
     all_results, baseline = {}, None
     for i, (name, tok_src, model_src, default_out, training_seed, pretrained) in enumerate(entries):
@@ -484,10 +630,16 @@ def main():
         if "wikipedia" in args.datasets:
             results.append(run_wikipedia(model, tokenizer, name, training_seed, languages, args.seed,
                                          args.num_samples, args.pilot_corpus_dir, args.min_chars, args.device,
-                                         use_bf16, seq_len, stride, args.max_article_chars, out_dir, start_id))
+                                         use_bf16, seq_len, stride, args.max_article_chars, out_dir, start_id,
+                                         args.wikipedia_cache_dir))
         if "sib200" in args.datasets:
             results.append(run_sib200(model, tokenizer, name, training_seed, languages, args.device,
                                       use_bf16, seq_len, stride, out_dir, start_id))
+        if "annotated" in args.datasets or "annotated_hq" in args.datasets:
+            results += run_annotated(model, tokenizer, name, training_seed, languages, args.annotated_table,
+                                     args.hq_by, args.hq_fraction, args.device, use_bf16, seq_len, stride,
+                                     args.max_article_chars, out_dir, start_id,
+                                     hq_only="annotated" not in args.datasets)
         add_loss_diff(results, baseline)
         if i == 0:
             baseline = results

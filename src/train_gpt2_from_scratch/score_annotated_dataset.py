@@ -32,7 +32,7 @@ also workable for a quick check):
 
 A --runs entry containing "/" is a run folder path instead of a name under --runs-dir, and results are
 keyed by that path -- needed for runs outside checkpoints/gpt2_top_doc whose folder names clash with
-runs inside it, e.g. the quality-weighted-loss runs (sh/eval_annotated_weighted.sh):
+runs inside it, e.g. the quality-weighted-loss runs (sh/eval/eval_annotated_weighted.sh):
     python -m src.train_gpt2_from_scratch.score_annotated_dataset \
         --output-dir data/rater_dataset/annotated_eval_weighted \
         --runs checkpoints/gpt2_top_doc/random_20M_ep1_seed42 checkpoints/gpt2_weighted_loss/edu_20M_ep1_seed42

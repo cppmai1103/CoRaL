@@ -1,0 +1,18 @@
+dataset_path: Davlan/sib200
+test_split: test
+fewshot_split: train          # demonstrations from train, never from the scored test split
+output_type: multiple_choice
+doc_to_text: "Classify the topic of the following sentence.\n\nSentence:\n{{text}}\n\nTopic:"
+doc_to_choice: !function utils.sib_choices
+doc_to_target: !function utils.sib_target
+target_delimiter: " "
+fewshot_delimiter: "\n\n"
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+  - metric: acc_norm
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

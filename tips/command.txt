@@ -1,0 +1,65 @@
+1. Check how many avaible GPU?
+sinfo -N -h -p long,cscc-gpu-p \
+  -O NodeList:15,StateCompact:12,Gres:60,GresUsed:80 |
+awk '
+BEGIN {
+    printf "%-12s %-10s %-10s %-10s\n",
+           "NODE", "STATE", "TOTAL", "FREE"
+}
+{
+    split($3, total, ":")
+    split($4, used, ":")
+    free = (total[3]+0) - (used[3]+0)
+
+    if ($2 ~ /down|drain|fail|maint/ || $2 ~ /\*/)
+        free = 0
+
+    if (free > 0)
+        printf "%-12s %-10s %-10d %-10d\n",
+               $1, $2, total[3]+0, free
+}'
+
+2. view my job
+watch -n 1 "squeue -u $USER"
+
+3. chek estimated time start 
+squeue --start -j JOB_ID
+
+4. Check Completed Jobs 
+sacct \
+  -j JOB_ID \
+  --format=JobID,JobName,Partition,AllocCPUS,Elapsed,State,ExitCode
+
+5. Each USER
+- 8 CPU cores
+- 1000 tasks/threads
+- memory soft limit: 16GB 
+- memory hard limit: 32GB
+- jobs: 8
+- GPU: 12 
+
+folders
+- lustre storage: 2T -> lfs quota -u $USER /l
+- home: du -sh $HOME
+- tmp: du -sh /tmp/$USER
+
+
+cscc-gpu-p
+- max: 2 GPU-node jobs
+- max 4 GPU per account 
+- max runtime: 24h 
+- min GPU request: 1
+- QoS: cscc-gpu-qos, gpu-debug-qos
+
+cscc-cpu-p
+- max: 512 cores
+- max: 2 concurrent running jocs
+- max: 72h 
+- qos: cscc-cpu-qos
+
+long 
+- max: 12 gpu concurrently 
+- max: 8 jocs
+- max runtime: 72 hours 
+- min GPU: 1 
+- qos: gpu-12

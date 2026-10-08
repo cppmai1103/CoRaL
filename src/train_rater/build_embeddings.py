@@ -13,7 +13,7 @@ For each document in data/rater_dataset/document_table.csv:
      count per chunk) into one embedding per document.
 
 Requires a GPU-capable environment with `torch` and `transformers` installed
-(see sh/run_job.sh / script_cpu.sh) -- this does not run in a plain sandbox.
+(see sh/rater/run_job.sh / script_cpu.sh) -- this does not run in a plain sandbox.
 
 Usage:
     python -m src.train_rater.build_embeddings

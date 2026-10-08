@@ -1,0 +1,32 @@
+Working directory: /home/mai.chau/workspace/CoRaL | MODEL=checkpoints/lora_cpt/gemma-3-1b-pt/avg5_50M_7languages_ep1_seed42/final | 5-shot | OUTPUT_DIR=checkpoints/lora_cpt/gemma-3-1b-pt/avg5_50M_7languages_ep1_seed42/lm_eval_all_5shot
+index, name, memory.used [MiB], memory.total [MiB]
+0, NVIDIA A100-SXM4-40GB, 31461 MiB, 40960 MiB
+1, NVIDIA A100-SXM4-40GB, 20367 MiB, 40960 MiB
+2, NVIDIA A100-SXM4-40GB, 13359 MiB, 40960 MiB
+3, NVIDIA A100-SXM4-40GB, 0 MiB, 40960 MiB
+torch 2.6.0+cu124 | lm_eval 0.4.13 | cuda available: True
+lm-eval 0.4.13 | model checkpoints/lora_cpt/gemma-3-1b-pt/avg5_50M_7languages_ep1_seed42/final | shots belebele=5, global_piqa=5, global_mmlu=5, include=5, sib200=5, sea_nli_normal=5, sea_nli_hard=5 | holdout 5 | 41 tasks: belebele_mya_Mymr belebele_tgl_Latn belebele_ind_Latn belebele_khm_Khmr belebele_zsm_Latn belebele_tha_Thai belebele_vie_Latn global_piqa_nonparallel_cloze_tgl_latn global_piqa_nonparallel_cloze_ind_latn global_piqa_nonparallel_cloze_zsm_latn global_piqa_nonparallel_cloze_tha_thai global_piqa_nonparallel_cloze_vie_latn global_mmlu_full_fil global_mmlu_full_id global_mmlu_full_ms global_mmlu_full_vi include_base_44_tagalog include_base_44_indonesian include_base_44_malay include_base_44_vietnamese sib200_mya sib200_fil sib200_ind sib200_khm sib200_zsm sib200_tha sib200_vie sea_nli_normal_mya sea_nli_normal_fil sea_nli_normal_ind sea_nli_normal_khm sea_nli_normal_zsm sea_nli_normal_tha sea_nli_normal_vie sea_nli_hard_mya sea_nli_hard_fil sea_nli_hard_ind sea_nli_hard_khm sea_nli_hard_zsm sea_nli_hard_tha sea_nli_hard_vie
+Passed argument batch_size = auto:1. Detecting largest batch size
+Determined largest batch size: 4
+# lm-evaluation-harness results: checkpoints/lora_cpt/gemma-3-1b-pt/avg5_50M_7languages_ep1_seed42/final
+
+Fixed scored subsets (identical for every model; item keys in subsets.json): belebele 500 per language, global_mmlu 100 per subject_category.
+
+Demonstrations per benchmark: belebele 5-shot, global_piqa 5-shot, global_mmlu 5-shot, include 5-shot, sib200 5-shot, sea_nli_normal 5-shot, sea_nli_hard 5-shot
+
+Accuracy in % (main metric per benchmark); N/A = benchmark has no data for that language; n = scored examples.
+
+| language | belebele (acc) | global_piqa (acc_norm) | global_mmlu (acc) | include (acc) | sib200 (acc) | sea_nli_normal (acc) | sea_nli_hard (acc) |
+|---|---|---|---|---|---|---|---|
+| burmese | 24.60 (n=500) | N/A | N/A | N/A | 63.24 (n=204) | 31.62 (n=136) | 41.03 (n=39) |
+| fil | 25.40 (n=500) | 56.84 (n=95) | 22.33 (n=600) | 29.09 (n=495) | 68.14 (n=204) | 33.65 (n=208) | 52.21 (n=113) |
+| indo | 26.40 (n=500) | 68.42 (n=95) | 23.33 (n=600) | 23.67 (n=545) | 73.04 (n=204) | 34.02 (n=241) | 53.24 (n=139) |
+| khmer | 24.80 (n=500) | N/A | N/A | N/A | 66.18 (n=204) | 29.73 (n=37) | 50.00 (n=18) |
+| malay | 26.80 (n=500) | 52.63 (n=95) | 24.00 (n=600) | 23.59 (n=496) | 74.02 (n=204) | 33.03 (n=109) | 43.42 (n=76) |
+| thai | 24.80 (n=500) | 58.95 (n=95) | N/A | N/A | 69.61 (n=204) | 33.62 (n=232) | 56.07 (n=107) |
+| vie | 25.20 (n=500) | 66.32 (n=95) | 25.67 (n=600) | 27.71 (n=545) | 75.49 (n=204) | 33.10 (n=142) | 62.32 (n=69) |
+| **macro** | **25.43** | **60.63** | **23.83** | **26.01** | **69.96** | **32.68** | **51.18** |
+
+Overall macro-average over the core benchmarks (belebele, global_piqa, global_mmlu, include): **33.98**
+
+Done: checkpoints/lora_cpt/gemma-3-1b-pt/avg5_50M_7languages_ep1_seed42/lm_eval_all_5shot/summary.md

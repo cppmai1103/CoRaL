@@ -1,0 +1,5 @@
+include: _flores_plus_template_yaml
+task: flores_plus_eng_khm
+dataset_kwargs:
+  target: khm_Khmr
+doc_to_text: "Translate the following sentence from English into Khmer.\nEnglish: {{source}}\nKhmer:"

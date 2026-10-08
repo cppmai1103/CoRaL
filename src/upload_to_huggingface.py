@@ -244,7 +244,7 @@ def prepare_model(args, destination):
     manifests = sorted(args.prepared_dir.glob("embeddings*/manifest.json"))
     if not manifests:
         print(f"Note: no embeddings*/manifest.json under {args.prepared_dir} (cache deleted/not built), "
-              f"skipping embedding_manifests/ -- rebuild with sh/rebuild_embeddings.sh if you want encoder "
+              f"skipping embedding_manifests/ -- rebuild with sh/rater/rebuild_embeddings.sh if you want encoder "
               f"provenance in this export", flush=True)
     for p in manifests:
         copy_file(p, destination / "embedding_manifests" / f"{p.parent.name}.json")

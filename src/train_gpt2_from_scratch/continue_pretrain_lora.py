@@ -25,7 +25,7 @@ Outputs in --output-dir (default checkpoints/lora_cpt/<model name>/<method>_ep<e
 Loss/perplexity are per model token (Gemma: 262K vocabulary): compare them only with other runs of the same base
 model, never with the GPT-2 runs (SeaLLM tokenizer); eval_test_set.py also reports bits per byte, which compares across tokenizers.
 
-Gemma is gated: set HF_TOKEN (sh/lora_cpt.sh reads it from .env).
+Gemma is gated: set HF_TOKEN (sh/train/lora_cpt.sh reads it from .env).
 
 --budget B (e.g. 10M, SeaLLM tokens with EOS per language, as prepare_data.py counts them) trains on the B part of a
 larger selection instead of the whole file: selections made with prepare_data.py --select-by tokens are nested, so
@@ -208,15 +208,19 @@ def main(argv=None):
 
     print("Loading and encoding documents ...", flush=True)
     budget_info = None
-    if budget:
-        train_docs, budget_info = load_budget_documents(args.train_data, budget, args.group_size, args.limit_docs)
-        print(f"  budget {budget_label(budget)} of {args.train_data}: "
-              + ", ".join(f"{l} {v['documents']:,}/{v['documents_in_file']:,} docs" for l, v in budget_info.items()), flush=True)
-    else:
-        train_docs = base.load_train_documents(args.train_data, args.limit_docs)
-    languages = sorted(train_docs)
     val_docs = base.load_heldout_documents(args.pool_dir, manifest, "validation", args.limit_docs)
     test_docs = base.load_heldout_documents(args.pool_dir, manifest, "test", args.limit_docs)
+    if args.eval_base_only:
+        train_docs = {}  # no selection needed: the languages come from the held-out split
+        languages = sorted(val_docs)
+    else:
+        if budget:
+            train_docs, budget_info = load_budget_documents(args.train_data, budget, args.group_size, args.limit_docs)
+            print(f"  budget {budget_label(budget)} of {args.train_data}: "
+                  + ", ".join(f"{l} {v['documents']:,}/{v['documents_in_file']:,} docs" for l, v in budget_info.items()), flush=True)
+        else:
+            train_docs = base.load_train_documents(args.train_data, args.limit_docs)
+        languages = sorted(train_docs)
     pad_id = tokenizer.pad_token_id
     pack = lambda docs: base.pack_streams({l: base.encode_documents(tokenizer, docs[l], bos=True) for l in languages},
                                           languages, args.seq_len, pad_id, args.seed)

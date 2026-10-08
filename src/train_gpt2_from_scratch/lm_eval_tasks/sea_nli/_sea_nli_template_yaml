@@ -1,0 +1,17 @@
+dataset_path: aisingapore/SEA-NLI
+test_split: test              # test-only: demonstrations (k > 0) are held out of it by eval_lm_harness.py
+output_type: multiple_choice
+doc_to_text: "Determine the relation between the following two sentences.\n\nPremise:\n{{premise_native}}\n\nHypothesis:\n{{hypothesis_native}}\n\nRelation:"
+doc_to_choice: !function utils.sea_choices
+doc_to_target: !function utils.sea_target
+target_delimiter: " "
+fewshot_delimiter: "\n\n"
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+  - metric: acc_norm
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

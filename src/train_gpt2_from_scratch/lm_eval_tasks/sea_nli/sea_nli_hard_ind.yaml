@@ -1,0 +1,4 @@
+include: _sea_nli_template_yaml
+task: sea_nli_hard_ind
+dataset_name: hard
+process_docs: !function utils.filter_indonesian

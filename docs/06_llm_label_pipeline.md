@@ -12,10 +12,10 @@ fails.
 python -m src.extract_llm_scores           # -> data/rater_dataset/llm_scores_annotated.{json,md}
 python -m src.prepare_llm_rater_dataset    # -> data/rater_dataset_llm/ (~3,960 train / ~566 validation / ~1,170 test per dimension)
 # all GPU/CPU jobs, chained with SLURM dependencies
-bash sh/submit_llm_pipeline.sh
+bash sh/pipelines/submit_llm_pipeline.sh
 ```
 
-**Save the job IDs the submit script prints**, e.g. `bash sh/submit_llm_pipeline.sh | tee llm_pipeline_jobs.txt`.
+**Save the job IDs the submit script prints**, e.g. `bash sh/pipelines/submit_llm_pipeline.sh | tee llm_pipeline_jobs.txt`.
 Every job writes `job-<id>.out` (progress, results) and `job-<id>.err` (warnings, tracebacks) in the project root.
 
 | Stage | Job name | Jobs | Typical time | Output |
@@ -68,12 +68,12 @@ Sanity checks before trusting results:
 
 | Symptom (in `.err`/`.out`, or `sacct` State) | Stage | Cause | Fix |
 | --- | --- | --- | --- |
-| `CUDA out of memory` | rater | long documents × micro-batch 4 | `DIMENSION=<d> MICRO_BATCH_SIZE=2 sbatch sh/finetune_llm.sh` (still 16 docs per step); if it persists add `GRADIENT_CHECKPOINTING=1` |
-| `DUE TO TIME LIMIT`, State `TIMEOUT` | rater | 10 epochs took longer than 1.5 h | rerun with more time: `DIMENSION=<d> sbatch --time=3:00:00 sh/finetune_llm.sh` (restarts from scratch) |
+| `CUDA out of memory` | rater | long documents × micro-batch 4 | `DIMENSION=<d> MICRO_BATCH_SIZE=2 sbatch sh/rater/finetune_llm.sh` (still 16 docs per step); if it persists add `GRADIENT_CHECKPOINTING=1` |
+| `DUE TO TIME LIMIT`, State `TIMEOUT` | rater | 10 epochs took longer than 1.5 h | rerun with more time: `DIMENSION=<d> sbatch --time=3:00:00 sh/rater/finetune_llm.sh` (restarts from scratch) |
 | `early stopping at epoch 2` | rater | validation MAE stopped improving | not an error; the best epoch is kept |
-| `DUE TO TIME LIMIT` | score | slower GPU / long documents | just resubmit `DIMENSION=<d> sbatch sh/score_pool_llm.sh`: finished languages are skipped (`already scored …`) |
+| `DUE TO TIME LIMIT` | score | slower GPU / long documents | just resubmit `DIMENSION=<d> sbatch sh/rater/score_pool_llm.sh`: finished languages are skipped (`already scored …`) |
 | `No such file … rater_llm/…/model` | score | its rater job failed or was cancelled | fix the rater first (it should show `DependencyNeverSatisfied`, not run) |
-| `ERROR: data/pilot_scores_llm/<d>_mean has scores for N of 6 languages` | select | a scoring job did not finish (the check stops select before a language silently drops out) | rerun that scoring job (`DIMENSION=<d> sbatch sh/score_pool_llm.sh`), then `sbatch sh/select_llm.sh` |
+| `ERROR: data/pilot_scores_llm/<d>_mean has scores for N of 6 languages` | select | a scoring job did not finish (the check stops select before a language silently drops out) | rerun that scoring job (`DIMENSION=<d> sbatch sh/rater/score_pool_llm.sh`), then `sbatch sh/rater/select_llm.sh` |
 | `compare_raters: … no predictions_test.csv, skipping` | select | a rater is missing | the comparison still writes; rerun select after the rater is done |
 | `data/pilot_selected/llm_<m>_20M/documents.csv` missing | gpt2 | select failed | rerun select, then the gpt2 jobs (section 5) |
 | `EOFError` in `torch.load` (init weights) | gpt2 | two jobs creating a new init file at once | cannot happen here (the SeaLLM init file `checkpoints/gpt2_top_doc/init/…V48384_seed42.pt` exists); if it does, just resubmit |
@@ -89,12 +89,12 @@ Sanity checks before trusting results:
 3. Cancel jobs stuck on it: `squeue -u $USER -t PD -o "%i %j %R" | grep DependencyNeverSatisfied` → `scancel <ids>`.
 4. Resubmit:
    - one job only: the single `sbatch` line from section 4 (e.g. one rater dimension);
-   - everything after a finished stage: `STAGES="score select gpt2 eval" bash sh/submit_llm_pipeline.sh`
+   - everything after a finished stage: `STAGES="score select gpt2 eval" bash sh/pipelines/submit_llm_pipeline.sh`
      (drop the stages that are already done; a stage only waits for stages submitted in the same call).
    - If one rater failed but the other four finished, rerun that rater alone, then submit its scoring job after it
-     (`DIMENSION=<d> sbatch --dependency=afterok:<rater job> sh/score_pool_llm.sh`), then
+     (`DIMENSION=<d> sbatch --dependency=afterok:<rater job> sh/rater/score_pool_llm.sh`), then
      `STAGES="select gpt2 eval"` with `sbatch --dependency` on that scoring job, or simply wait for it to finish
-     and run `STAGES="select gpt2 eval" bash sh/submit_llm_pipeline.sh`.
+     and run `STAGES="select gpt2 eval" bash sh/pipelines/submit_llm_pipeline.sh`.
 
 What is safe to rerun:
 

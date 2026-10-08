@@ -1,0 +1,5 @@
+include: _flores_plus_template_yaml
+task: flores_plus_eng_zsm
+dataset_kwargs:
+  target: zsm_Latn
+doc_to_text: "Translate the following sentence from English into Malay.\nEnglish: {{source}}\nMalay:"
