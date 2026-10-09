@@ -32,7 +32,9 @@ set -eo pipefail
 # (0-shot as docs/03b recommends: SHOTS="sea_nli_normal=0 sea_nli_hard=0").
 # Per-benchmark k: SHOTS="sea_nli_normal=5 sea_nli_hard=5 flores_plus=1" (overrides NUM_FEWSHOT for those).
 # Belebele, Global-MMLU and FLORES+ are scored on fixed subsets (500/language, 100/subject category, 3/topic; the same
-# items for every model, see subsets.json); FULL=1 scores the complete test sets.
+# items for every model, see subsets.json); FULL=1 scores the complete test sets, FULL=global_mmlu only that one.
+# Also runs without SLURM (bash sh/eval/eval_lm_harness.sh from the project root; GPU=1 picks the GPU), e.g. on a
+# rented server with the .venv/lm-eval venv and no /apps conda.
 
 MODEL="${MODEL:?set MODEL to a Hub ID or a merged model folder}"
 OUTPUT_DIR="${OUTPUT_DIR:?set OUTPUT_DIR}"
@@ -44,21 +46,27 @@ SHOTS="${SHOTS:-}"                   # per-benchmark k, e.g. "sib200=0 flores_pl
 LANGUAGES="${LANGUAGES:-burmese fil indo khmer malay thai vie}"
 LIMIT="${LIMIT:-}"
 FULL="${FULL:-}"
+BATCH_SIZE="${BATCH_SIZE:-}"         # fixed batch size; default auto (can pick too large and run out of memory)
 ARGS=(--model "$MODEL" --output-dir "$OUTPUT_DIR" --num-fewshot "$NUM_FEWSHOT" --holdout "$HOLDOUT" --seed "$SEED"
       --benchmarks $BENCHMARKS --languages $LANGUAGES)
 [ -n "$LIMIT" ] && ARGS+=(--limit "$LIMIT")
 [ -n "$SHOTS" ] && ARGS+=(--shots $SHOTS)
-[ -n "$FULL" ] && ARGS+=(--full-test-sets)
+[ -n "$BATCH_SIZE" ] && ARGS+=(--batch-size "$BATCH_SIZE")
+if [ "$FULL" = 1 ]; then ARGS+=(--full-test-sets); elif [ -n "$FULL" ]; then ARGS+=(--full-test-sets $FULL); fi
 
-cd "$SLURM_SUBMIT_DIR"
+cd "${SLURM_SUBMIT_DIR:-.}"
+[ -n "$GPU" ] && export CUDA_VISIBLE_DEVICES="$GPU"
 echo "Working directory: $(pwd) | MODEL=$MODEL | ${NUM_FEWSHOT}-shot | OUTPUT_DIR=$OUTPUT_DIR"
 
-source /apps/local/anaconda3/etc/profile.d/conda.sh
-conda activate sea-rater
+if [ -f /apps/local/anaconda3/etc/profile.d/conda.sh ]; then
+  source /apps/local/anaconda3/etc/profile.d/conda.sh
+  conda activate sea-rater
+fi
 source .venv/lm-eval/bin/activate
 
 export PYTHONNOUSERSITE=1
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"   # less fragmentation
 set -a; source .env; set +a   # HF_TOKEN (Gemma and some benchmark datasets are gated)
 # Shared Hugging Face cache: the login shell's XDG_CACHE_HOME (/tmp/$USER/cache) is node-local.
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"

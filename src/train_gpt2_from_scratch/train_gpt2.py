@@ -310,10 +310,18 @@ def summarise_losses(sums: torch.Tensor, counts: torch.Tensor, languages: list[s
 # --------------------------------------------------------------------------
 
 class CsvLog:
-    def __init__(self, path: Path, fields: list[str]):
+    def __init__(self, path: Path, fields: list[str], keep_upto_step: int | None = None):
+        """keep_upto_step (resuming from a checkpoint): keep the rows already logged up to that step, drop later ones
+        (logged after the checkpoint, so they will be logged again) and append; otherwise start a new file."""
+        kept = []
+        if keep_upto_step is not None and path.is_file():
+            with path.open(encoding="utf-8", newline="") as f:
+                kept = [r for r in csv.DictReader(f) if int(r["step"]) <= keep_upto_step]
         self.f = path.open("w", encoding="utf-8", newline="")
         self.writer = csv.DictWriter(self.f, fieldnames=fields)
         self.writer.writeheader()
+        self.writer.writerows(kept)
+        self.f.flush()
 
     def write(self, row: dict) -> None:
         self.writer.writerow(row)
@@ -321,6 +329,65 @@ class CsvLog:
 
     def close(self) -> None:
         self.f.close()
+
+
+class Checkpointer:
+    """Periodic training checkpoints, so a run killed part-way can resume where it stopped.
+
+    Off unless the caller sets args.checkpoint_dir and args.save_every (> 0); the GPT-2 scripts never do. Every
+    args.save_every steps it saves the trainable parameters (only the LoRA adapter for LoRA runs), the optimizer and
+    scheduler state, the RNG states and the step reached, replacing the previous checkpoint (written to a temporary
+    file, then renamed, so a crash while saving leaves the previous one intact). With args.resume, training restarts
+    after the saved step: block order is a fixed function of the seed and epoch, so the resumed run sees exactly the
+    batches the uninterrupted run would have. args.checkpoint_fingerprint (the settings that must not change) is
+    stored and checked on resume."""
+
+    def __init__(self, args, model, optimizer, scheduler):
+        self.dir = getattr(args, "checkpoint_dir", None)
+        self.every = getattr(args, "save_every", 0) if self.dir else 0
+        self.resume_enabled = bool(self.dir) and getattr(args, "resume", False)
+        self.fingerprint = getattr(args, "checkpoint_fingerprint", {})
+        self.model, self.optimizer, self.scheduler = model, optimizer, scheduler
+
+    @staticmethod
+    def saved_step(checkpoint_dir) -> int | None:
+        path = Path(checkpoint_dir) / "state.json" if checkpoint_dir else None
+        return json.loads(path.read_text(encoding="utf-8"))["step"] if path and path.is_file() else None
+
+    def resume(self) -> dict | None:
+        if not self.resume_enabled or not (Path(self.dir) / "checkpoint.pt").is_file():
+            return None
+        ckpt = torch.load(Path(self.dir) / "checkpoint.pt", map_location="cpu", weights_only=False)
+        if ckpt["fingerprint"] != self.fingerprint:
+            changed = sorted(k for k in set(ckpt["fingerprint"]) | set(self.fingerprint)
+                             if ckpt["fingerprint"].get(k) != self.fingerprint.get(k))
+            raise SystemExit(f"Checkpoint {self.dir} was made with other settings ({', '.join(changed)}): delete it "
+                             "or pass --no-resume to start over")
+        params = dict(self.model.named_parameters())
+        with torch.no_grad():
+            for name, value in ckpt["trainable"].items():
+                params[name].copy_(value)
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.scheduler.load_state_dict(ckpt["scheduler"])
+        torch.set_rng_state(ckpt["rng_cpu"])
+        if ckpt["rng_cuda"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(ckpt["rng_cuda"])
+        print(f"Resumed from {self.dir} at step {ckpt['state']['step']}", flush=True)
+        return ckpt["state"]
+
+    def maybe_save(self, step: int, total_steps: int, state: dict) -> None:
+        if not self.every or step % self.every or step == total_steps:
+            return
+        out = Path(self.dir)
+        out.mkdir(parents=True, exist_ok=True)
+        ckpt = {"trainable": {n: p.detach().cpu() for n, p in self.model.named_parameters() if p.requires_grad},
+                "optimizer": self.optimizer.state_dict(), "scheduler": self.scheduler.state_dict(),
+                "rng_cpu": torch.get_rng_state(),
+                "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "fingerprint": self.fingerprint, "state": {**state, "step": step}}
+        torch.save(ckpt, out / "checkpoint.pt.tmp")
+        (out / "checkpoint.pt.tmp").replace(out / "checkpoint.pt")
+        (out / "state.json").write_text(json.dumps({"step": step, "total_steps": total_steps}), encoding="utf-8")
 
 
 def log_eval(eval_log: CsvLog, result: dict, split: str, step: int, epoch: float, tokens: int) -> None:
@@ -401,30 +468,35 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
     dropped = n_blocks - steps_per_epoch * args.batch_size
     optimizer = build_optimizer(model, args.lr, args.weight_decay, device)
     scheduler = get_cosine_schedule_with_warmup(optimizer, int(args.warmup_ratio * total_steps), total_steps)
+    checkpointer = Checkpointer(args, model, optimizer, scheduler)
+    resumed = checkpointer.resume()
+    start_step = resumed["step"] if resumed else 0
 
     eval_steps = {e * steps_per_epoch + round(k * steps_per_epoch / args.evals_per_epoch)
                   for e in range(args.epochs) for k in range(1, args.evals_per_epoch + 1)}
     train_log = CsvLog(out_dir / "train_log.csv",
-                       ["step", "epoch", "tokens_consumed", "train_loss", "lr", "tokens_per_sec", "peak_mem_gib"])
+                       ["step", "epoch", "tokens_consumed", "train_loss", "lr", "tokens_per_sec", "peak_mem_gib"],
+                       keep_upto_step=start_step if resumed else None)
     print(f"Training: {n_blocks} blocks/epoch -> {steps_per_epoch} steps/epoch x {args.epochs} epochs = {total_steps} steps "
           f"({args.batch_size} sequences x {args.seq_len} tokens per step; {dropped} blocks left out per epoch)")
 
-    if args.eval_at_start:
+    if args.eval_at_start and not resumed:
         result = evaluate(model, val_blocks, languages, args.eval_batch_size, device, use_bf16, desc="validation @ step 0", nested=True)
         log_eval(eval_log, result, "validation", 0, 0.0, 0)
         print(f"  step 0 validation: {format_eval(result)}", flush=True)
 
-    tokens_consumed, step = 0, 0
+    tokens_consumed, step = (resumed["tokens_consumed"], start_step) if resumed else (0, 0)
     window_loss, window_steps, window_tokens = 0.0, 0, 0
     window_start = time.time()
     started = time.time()
     if torch.device(device).type == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    history = []
-    for epoch in range(args.epochs):
+    history = resumed["history"] if resumed else []
+    for epoch in range(start_step // steps_per_epoch, args.epochs):
         perm = torch.randperm(n_blocks, generator=torch.Generator().manual_seed(args.seed * 1000 + epoch))
         epoch_loss = 0.0
-        bar = progress(range(steps_per_epoch), desc=f"epoch {epoch + 1}/{args.epochs}", unit="step")
+        first = max(start_step - epoch * steps_per_epoch, 0)  # resuming: skip the batches already trained
+        bar = progress(range(first, steps_per_epoch), desc=f"epoch {epoch + 1}/{args.epochs}", unit="step")
         for s in bar:
             idx = perm[s * args.batch_size:(s + 1) * args.batch_size]
             ids, mask = train_blocks["input_ids"][idx], train_blocks["attention_mask"][idx]
@@ -450,7 +522,7 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
             epoch_loss += step_loss
 
             lr = scheduler.get_last_lr()[0]
-            bar.set_postfix(loss=f"{epoch_loss / (s + 1):.4f}", lr=f"{lr:.2e}", refresh=False)
+            bar.set_postfix(loss=f"{epoch_loss / (s + 1 - first):.4f}", lr=f"{lr:.2e}", refresh=False)
             if step % args.log_every == 0 or step == total_steps:
                 if torch.device(device).type == "cuda":
                     torch.cuda.synchronize()
@@ -467,6 +539,7 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
                 history.append({"step": step, "epoch": step / steps_per_epoch, "tokens": tokens_consumed,
                                 "validation": result["macro"]})
                 print(f"  step {step} (epoch {step / steps_per_epoch:.2f}) validation: {format_eval(result)}", flush=True)
+            checkpointer.maybe_save(step, total_steps, {"tokens_consumed": tokens_consumed, "history": history})
         bar.close()
 
     train_log.close()

@@ -237,32 +237,36 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
     dropped = n_blocks - steps_per_epoch * args.batch_size
     optimizer = base.build_optimizer(model, args.lr, args.weight_decay, device)
     scheduler = get_cosine_schedule_with_warmup(optimizer, int(args.warmup_ratio * total_steps), total_steps)
+    checkpointer = base.Checkpointer(args, model, optimizer, scheduler)
+    resumed = checkpointer.resume()
+    start_step = resumed["step"] if resumed else 0
 
     eval_steps = {e * steps_per_epoch + round(k * steps_per_epoch / args.evals_per_epoch)
                   for e in range(args.epochs) for k in range(1, args.evals_per_epoch + 1)}
     train_log = base.CsvLog(out_dir / "train_log.csv",
                             ["step", "epoch", "tokens_consumed", "train_loss", "mean_batch_weight", "lr",
-                             "tokens_per_sec", "peak_mem_gib"])
+                             "tokens_per_sec", "peak_mem_gib"], keep_upto_step=start_step if resumed else None)
     print(f"Training: {n_blocks} blocks/epoch -> {steps_per_epoch} steps/epoch x {args.epochs} epochs = {total_steps} steps "
           f"({args.batch_size} sequences x {args.seq_len} tokens per step; {dropped} blocks left out per epoch)")
 
-    if args.eval_at_start:
+    if args.eval_at_start and not resumed:
         result = base.evaluate(model, val_blocks, languages, args.eval_batch_size, device, use_bf16,
                                desc="validation @ step 0", nested=True)
         base.log_eval(eval_log, result, "validation", 0, 0.0, 0)
         print(f"  step 0 validation: {base.format_eval(result)}", flush=True)
 
-    tokens_consumed, step = 0, 0
+    tokens_consumed, step = (resumed["tokens_consumed"], start_step) if resumed else (0, 0)
     window_loss, window_steps, window_tokens = 0.0, 0, 0
     window_start = time.time()
     started = time.time()
     if torch.device(device).type == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    history = []
-    for epoch in range(args.epochs):
+    history = resumed["history"] if resumed else []
+    for epoch in range(start_step // steps_per_epoch, args.epochs):
         perm = torch.randperm(n_blocks, generator=torch.Generator().manual_seed(args.seed * 1000 + epoch))
         epoch_loss = 0.0
-        bar = base.progress(range(steps_per_epoch), desc=f"epoch {epoch + 1}/{args.epochs}", unit="step")
+        first = max(start_step - epoch * steps_per_epoch, 0)  # resuming: skip the batches already trained
+        bar = base.progress(range(first, steps_per_epoch), desc=f"epoch {epoch + 1}/{args.epochs}", unit="step")
         for s in bar:
             idx = perm[s * args.batch_size:(s + 1) * args.batch_size]
             ids, mask, weight = (train_blocks["input_ids"][idx], train_blocks["attention_mask"][idx],
@@ -289,7 +293,7 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
             epoch_loss += step_loss
 
             lr = scheduler.get_last_lr()[0]
-            bar.set_postfix(loss=f"{epoch_loss / (s + 1):.4f}", lr=f"{lr:.2e}", refresh=False)
+            bar.set_postfix(loss=f"{epoch_loss / (s + 1 - first):.4f}", lr=f"{lr:.2e}", refresh=False)
             if step % args.log_every == 0 or step == total_steps:
                 if torch.device(device).type == "cuda":
                     torch.cuda.synchronize()
@@ -308,6 +312,7 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
                                 "validation": result["macro"]})
                 print(f"  step {step} (epoch {step / steps_per_epoch:.2f}) validation: {base.format_eval(result)}",
                       flush=True)
+            checkpointer.maybe_save(step, total_steps, {"tokens_consumed": tokens_consumed, "history": history})
         bar.close()
 
     train_log.close()

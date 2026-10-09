@@ -34,16 +34,31 @@ batch) after which the running token count reaches B -- exactly the documents pr
 for B. Training is then the same as for any selection (all documents shuffled together, cosine schedule), so one
 selection at the largest budget serves every budget, each trained as its own run.
 
+--loss-weight-scores DIR trains with a quality-weighted loss (docs/05_loss.md, as train_gpt2_weighted.py) instead of
+the ordinary one: every training token's loss is multiplied by its document's weight w_d = --weight-offset + score_d *
+--weight-scale (score_d from DIR/<language>.csv, e.g. data/pilot_scores_7languages/avg5_mean), normalised per language
+so the token-weighted mean weight is 1. Use the same --train-data as an unweighted run (e.g. the random selection) and
+the two runs see the same documents in the same order; only the loss weighting differs. Validation/test stay unweighted.
+
+Checkpoints: every --save-every optimizer steps (default 250, ~20 min for OLMo 1B on an A100) the LoRA adapter, optimizer,
+scheduler and RNG states go to <output-dir>/checkpoint/ (the previous one is replaced). Rerunning the same command after a
+crash or a kill resumes from it (--no-resume starts over), training exactly the batches the uninterrupted run would have;
+a checkpoint made with other training settings is refused. It is deleted once the final model is saved.
+
 Run from the project root (GPU):
     python -m src.train_gpt2_from_scratch.continue_pretrain_lora --eval-base-only
     python -m src.train_gpt2_from_scratch.continue_pretrain_lora --method avg4_20M
     python -m src.train_gpt2_from_scratch.continue_pretrain_lora --method avg5_50M_7languages --budget 10M \\
         --pool-dir data/pilot_corpus_7languages
+    python -m src.train_gpt2_from_scratch.continue_pretrain_lora --method wavg5_50M_7languages \\
+        --train-data data/pilot_selected/random_50M_7languages/documents.csv \\
+        --loss-weight-scores data/pilot_scores_7languages/avg5_mean --pool-dir data/pilot_corpus_7languages
 """
 
 import argparse
 import csv
 import json
+import shutil
 import sys
 import time
 from collections import defaultdict
@@ -52,6 +67,7 @@ from pathlib import Path
 import torch
 
 from src.train_gpt2_from_scratch import train_gpt2 as base
+from src.train_gpt2_from_scratch import train_gpt2_weighted as weighted
 
 DEFAULT_MODEL = "google/gemma-3-270m"
 LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
@@ -119,6 +135,23 @@ def load_budget_documents(path: Path, budget: int, group_size: int, limit: int =
     return docs, info
 
 
+def encode_weighted(tokenizer, train_path: Path, scores_dir: Path, args) -> tuple[dict, dict]:
+    """Training documents encoded as in the unweighted runs (BOS + text + EOS), each paired with its loss weight
+    (normalised per language unless --no-normalize-per-language). Returns (encoded, raw mean weight per language)."""
+    items = weighted.load_train_documents_with_ids(train_path, args.limit_docs)
+    scores = weighted.load_importance_scores(scores_dir, sorted(items))
+    encoded = {}
+    for language, docs in items.items():
+        ids = base.encode_documents(tokenizer, [text for _, text in docs], bos=True)
+        missing = [doc_id for doc_id, _ in docs if doc_id not in scores[language]]
+        if missing:
+            raise SystemExit(f"{language}: {len(missing)} training documents have no score in {scores_dir}, e.g. {missing[0]}")
+        encoded[language] = [(i, weighted.score_to_weight(scores[language][doc_id], args.weight_offset, args.weight_scale))
+                             for i, (doc_id, _) in zip(ids, docs)]
+    raw_means = weighted.normalize_weights_per_language(encoded) if args.normalize_per_language else {}
+    return encoded, raw_means
+
+
 def count_parameters(model) -> tuple[int, int]:
     return sum(p.numel() for p in model.parameters()), sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -130,6 +163,11 @@ def write_summary(path: Path, results: dict) -> None:
              f"alpha={cfg['lora_alpha']}, dropout={cfg['lora_dropout']} on {', '.join(LORA_TARGETS)} "
              f"({results['trainable_parameters'] / 1e6:.2f}M trainable). {cfg['epochs']} epoch(s), lr {cfg['lr']}, "
              f"seed {cfg['seed']}, {cfg['seq_len']}-token blocks.", ""]
+    if "weighting" in results:
+        w = results["weighting"]
+        lines += [f"Quality-weighted training loss: w_d = {w['offset']} + score_d * {w['scale']} (score_d from "
+                  f"`{w['scores_dir']}`), per-language normalisation: {w['normalize_per_language']}. "
+                  "Validation/test use the ordinary unweighted loss.", ""]
     if "run" in results:
         run, d = results["run"], results["data"]
         lines += [f"- Training tokens ({short_name(cfg['model'])} tokenizer): {d['train_unique_tokens']:,} unique, "
@@ -157,6 +195,13 @@ def main(argv=None):
                              "the selection must have been made for a budget at least as large")
     parser.add_argument("--group-size", type=int, default=5,
                         help="--budget: documents per selection group in prepare_data.py (round-robin uses its batches)")
+    parser.add_argument("--loss-weight-scores", type=Path, default=None,
+                        help="Weight each training document's token loss by its score in DIR/<language>.csv "
+                             "(e.g. data/pilot_scores_7languages/avg5_mean); default: ordinary unweighted loss")
+    parser.add_argument("--weight-offset", type=float, default=0.5)
+    parser.add_argument("--weight-scale", type=float, default=0.2, help="1/5: maps a 0-5 score to 0.5-1.5")
+    parser.add_argument("--no-normalize-per-language", dest="normalize_per_language", action="store_false",
+                        help="--loss-weight-scores: keep the raw weights instead of a token-weighted mean of 1 per language")
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -174,6 +219,10 @@ def main(argv=None):
     parser.add_argument("--evals-per-epoch", type=int, default=2)
     parser.add_argument("--no-eval-at-start", dest="eval_at_start", action="store_false")
     parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--save-every", type=int, default=250,
+                        help="Save a resumable checkpoint every N optimizer steps (0: never)")
+    parser.add_argument("--no-resume", dest="resume", action="store_false",
+                        help="Ignore an existing <output-dir>/checkpoint/ and train from the start")
     parser.add_argument("--gradient-checkpointing", action="store_true", help="Less memory, ~30%% slower")
     parser.add_argument("--eval-base-only", action="store_true",
                         help="Evaluate the pretrained model on validation/test without training")
@@ -189,6 +238,8 @@ def main(argv=None):
         raise SystemExit("--batch-size must be a multiple of --micro-batch-size")
     args.train_data = args.train_data or Path("data/pilot_selected") / args.method / "documents.csv"
     budget = parse_budget(args.budget) if args.budget else None
+    if args.loss_weight_scores and (budget or args.eval_base_only):
+        raise SystemExit("--loss-weight-scores cannot be combined with --budget or --eval-base-only")
     method_name = f"{args.method}_budget{budget_label(budget)}" if budget else args.method
     run_name = "base" if args.eval_base_only else f"{method_name}_ep{args.epochs}_seed{args.seed}"
     out_dir = args.output_dir or args.output_root / short_name(args.model) / run_name
@@ -214,7 +265,9 @@ def main(argv=None):
         train_docs = {}  # no selection needed: the languages come from the held-out split
         languages = sorted(val_docs)
     else:
-        if budget:
+        if args.loss_weight_scores:
+            train_docs, raw_weight_means = encode_weighted(tokenizer, args.train_data, args.loss_weight_scores, args)
+        elif budget:
             train_docs, budget_info = load_budget_documents(args.train_data, budget, args.group_size, args.limit_docs)
             print(f"  budget {budget_label(budget)} of {args.train_data}: "
                   + ", ".join(f"{l} {v['documents']:,}/{v['documents_in_file']:,} docs" for l, v in budget_info.items()), flush=True)
@@ -226,7 +279,13 @@ def main(argv=None):
                                           languages, args.seq_len, pad_id, args.seed)
     val_blocks, test_blocks = pack(val_docs), pack(test_docs)
     train_blocks, unique_tokens = None, 0
-    if not args.eval_base_only:
+    if args.loss_weight_scores:
+        train_blocks = weighted.pack_weighted_streams(train_docs, languages, args.seq_len, pad_id, args.seed)
+        unique_tokens = sum(s["tokens"] for s in train_blocks["stats"].values())
+        print(f"  train: {unique_tokens:,} tokens in {train_blocks['input_ids'].size(0)} blocks, loss-weighted by "
+              f"{args.loss_weight_scores} (raw mean weight per language: "
+              + ", ".join(f"{l} {m:.3f}" for l, m in raw_weight_means.items()) + ")", flush=True)
+    elif not args.eval_base_only:
         train_blocks = pack(train_docs)
         unique_tokens = sum(s["tokens"] for s in train_blocks["stats"].values())
         print(f"  train: {unique_tokens:,} tokens in {train_blocks['input_ids'].size(0)} blocks", flush=True)
@@ -243,14 +302,28 @@ def main(argv=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     tokenizer.save_pretrained(out_dir / "tokenizer")
+    args.checkpoint_dir = None if args.eval_base_only else out_dir / "checkpoint"
+    # settings a resumed run must share with the checkpoint (anything that changes the batches or the optimization)
+    args.checkpoint_fingerprint = {k: str(v) for k, v in vars(args).items() if k in (
+        "model", "train_data", "budget", "group_size", "lora_r", "lora_alpha", "lora_dropout", "epochs", "seed",
+        "seq_len", "lr", "weight_decay", "warmup_ratio", "batch_size", "loss_weight_scores", "weight_offset",
+        "weight_scale", "normalize_per_language", "limit_docs")}
+    resume_step = base.Checkpointer.saved_step(args.checkpoint_dir) if args.resume else None
+    if args.checkpoint_dir and not args.resume and args.checkpoint_dir.exists():
+        shutil.rmtree(args.checkpoint_dir)
     eval_log = base.CsvLog(out_dir / "eval_log.csv", ["step", "epoch", "tokens_consumed", "split", "language", "loss",
-                                                      "perplexity", "target_tokens"])
+                                                      "perplexity", "target_tokens"], keep_upto_step=resume_step)
 
     results = {"config": config, "parameters": n_params, "trainable_parameters": n_trainable}
     steps, tokens = 0, 0
     if not args.eval_base_only:
-        run = base.train(model, train_blocks, val_blocks, languages, args, device, use_bf16, out_dir, eval_log)
+        trainer = weighted.train if args.loss_weight_scores else base.train
+        run = trainer(model, train_blocks, val_blocks, languages, args, device, use_bf16, out_dir, eval_log)
         results["run"] = run
+        if args.loss_weight_scores:
+            results["weighting"] = {"scores_dir": str(args.loss_weight_scores), "offset": args.weight_offset,
+                                    "scale": args.weight_scale, "normalize_per_language": args.normalize_per_language,
+                                    "raw_mean_weight": raw_weight_means}
         results["data"] = {"train_unique_tokens": unique_tokens, "train": train_blocks["stats"]}
         if budget_info:
             results["data"]["budget"] = {"tokens_per_language": budget, "selection": budget_info}
@@ -276,6 +349,8 @@ def main(argv=None):
             model = model.merge_and_unload()
         model.to(torch.bfloat16).save_pretrained(out_dir / "final")
         tokenizer.save_pretrained(out_dir / "final")
+    if args.checkpoint_dir and args.checkpoint_dir.exists():
+        shutil.rmtree(args.checkpoint_dir)  # the run is complete: final/ and adapter/ replace it
     print(f"Wrote results to {out_dir}")
 
 

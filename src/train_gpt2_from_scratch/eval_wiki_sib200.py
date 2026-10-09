@@ -55,6 +55,31 @@ Several --hq-by scores give one high-quality result each, e.g. --hq-by avg5 clea
 annotated_hq_cleanliness (cleanliness is skewed to the top scores: its 50% cutoff splits a tie by doc_id).
 Per-document rows go to <out-dir>/annotated/<language>.csv, topic = high_quality / other.
 
+Bloom Library storybooks (--datasets bloom; sil-ai/bloom-lm, every book of the train, val and test files pooled,
+one document per book): the languages it has -- Burmese 38 books, Filipino 68, Indonesian 259, Khmer 35, Thai 285,
+Vietnamese 1; no Malay, so that language is skipped and the macro averages cover 6 languages, not 7. Simple
+children's-story text, unlike Wikipedia; Vietnamese (one book) and Khmer (~12K characters) are too small for a
+reliable number. The three JSON files are downloaded once to <--wikipedia-cache-dir>/bloom_lm/ (--prepare-only does
+it too), so GPU jobs run offline. Per-book rows go to <out-dir>/bloom/<language>.csv, original_split = the file the
+book came from.
+
+Clean, human-translated text (all downloaded once to <--wikipedia-cache-dir>/<dataset>/, also by --prepare-only):
+  bible  eBible corpus (github.com/BibleNLP/ebible), one open translation per language, the WHOLE text, one document
+         per chapter (verses in order): Burmese Common Language Bible, Tagalog Bible (unfoldingWord), Indonesian AYT,
+         Contextualized Malay NT (New Testament only), Thai KJV, Vietnamese 1923. No open Khmer translation: skipped.
+  ntrex  NTREX-128 (github.com/MicrosoftTranslator/NTREX), professional translations of the WMT19 English news test
+         set, the WHOLE set: 123 news articles per language (1,997 sentences), one document per article
+         (DOCUMENT_IDS.tsv), sentences in order.
+  alt    Asian Language Treebank (mutiyama/alt, alt-parallel), professional translations of English Wikinews:
+         --alt-articles (default 1,000) of its 1,888 articles, drawn once with --seed among the articles complete in
+         all 7 languages -- the SAME articles in every language -- one document per article, sentences in order.
+  flores_wikibooks / flores_wikivoyage
+         FLORES+ (openlanguagedata/flores_plus, gated: accept its terms; HF_TOKEN), professional translations of English
+         Wikibooks (non-fiction books, Wikijunior) / Wikivoyage (travel guides) passages, dev + devtest pooled, one
+         document per source page (its sentences in order): ~179 / ~176 pages, ~650 / ~670 sentences per language.
+         Note: SIB-200 and Belebele are built on FLORES sentences, so these are not independent of those benchmarks.
+Sentences and verses are joined with newlines. Per-document rows go to <out-dir>/<dataset>/<language>.csv.
+
 The Wikipedia sample is drawn once and saved under --wikipedia-cache-dir (default data/eval_sets/, one JSONL per
 language, named after the seed, sample size and --pilot-corpus-dir), so every model scores the same articles and GPU
 jobs run offline; draw it on the login node first with --prepare-only. For the 7-language LoRA runs see
@@ -99,6 +124,16 @@ def progress(iterable, **kwargs):
 
 WIKIPEDIA_LANGUAGES = {"fil": "tl", "indo": "id", "khmer": "km", "malay": "ms", "thai": "th", "vie": "vi",
                        "burmese": "my"}
+BLOOM_LANGUAGES = {"burmese": "mya", "fil": "fil", "indo": "ind", "khmer": "khm", "thai": "tha", "vie": "vie"}  # no Malay
+BLOOM_SPLITS = ("train", "val", "test")
+EBIBLE_RAW = "https://raw.githubusercontent.com/BibleNLP/ebible/main/"
+BIBLE_TRANSLATIONS = {"burmese": "mya-mya", "fil": "tgl-tglulb", "indo": "ind-indayt", "malay": "zlm-zlmKSZI",
+                      "thai": "tha-thaKJV", "vie": "vie-vie1934"}  # no open Khmer translation
+NTREX_RAW = "https://raw.githubusercontent.com/MicrosoftTranslator/NTREX/main/"
+NTREX_FILES = {"burmese": "mya", "fil": "fil", "indo": "ind", "khmer": "khm", "malay": "msa", "thai": "tha", "vie": "vie"}
+FLORES_CODES = {"burmese": "mya_Mymr", "fil": "fil_Latn", "indo": "ind_Latn", "khmer": "khm_Khmr", "malay": "zsm_Latn",
+                "thai": "tha_Thai", "vie": "vie_Latn"}
+ALT_CODES = {"burmese": "my", "fil": "fil", "indo": "id", "khmer": "khm", "malay": "ms", "thai": "th", "vie": "vi"}
 SIB200_LANGUAGES = {"fil": "tgl_Latn", "indo": "ind_Latn", "khmer": "khm_Khmr",
                     "malay": "zsm_Latn", "thai": "tha_Thai", "vie": "vie_Latn", "burmese": "mya_Mymr"}
 
@@ -208,6 +243,125 @@ def sample_wikipedia(language: str, seed: int, num_samples: int, pilot_corpus_di
 # --------------------------------------------------------------------------
 # SIB-200: load (all splits pooled, no sampling)
 # --------------------------------------------------------------------------
+
+def bloom_files(cache_dir: Path) -> dict[str, Path]:
+    """The sil-ai/bloom-lm split files (JSON: language code -> list of books), downloaded once to cache_dir/bloom_lm/."""
+    out = cache_dir / "bloom_lm"
+    paths = {s: out / f"bloom_lm_{s}.json" for s in BLOOM_SPLITS}
+    if not all(p.is_file() for p in paths.values()):
+        from huggingface_hub import hf_hub_download
+        for s, p in paths.items():
+            hf_hub_download("sil-ai/bloom-lm", p.name, repo_type="dataset", local_dir=out)
+    return paths
+
+
+def load_bloom(language: str, cache_dir: Path) -> list[dict]:
+    """Every book of one language, train + val + test pooled (empty for a language bloom-lm does not have)."""
+    code = BLOOM_LANGUAGES.get(language)
+    if code is None:
+        return []
+    examples = []
+    for split, path in bloom_files(cache_dir).items():
+        for i, book in enumerate(json.loads(path.read_text(encoding="utf-8")).get(code, [])):
+            if book["text"].strip():
+                examples.append({"language": language, "example_id": f"bloom-{code}-{split}-{i}-{book.get('bookInstanceId', '')}",
+                                 "original_split": split, "topic": "", "source_url": "", "text": book["text"]})
+    return examples
+
+
+def fetch(url: str, path: Path) -> Path:
+    """Download url to path once (later runs, and offline GPU jobs, read the saved copy)."""
+    if not path.is_file():
+        import urllib.request
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(urllib.request.urlopen(url, timeout=120).read())
+        tmp.replace(path)
+    return path
+
+
+def doc_example(language: str, example_id: str, split: str, text: str, url: str = "") -> dict:
+    return {"language": language, "example_id": example_id, "original_split": split, "topic": "", "source_url": url,
+            "text": text}
+
+
+def load_bible(language: str, cache_dir: Path) -> list[dict]:
+    """The whole open eBible translation of a language, one document per chapter (verses in order)."""
+    name = BIBLE_TRANSLATIONS.get(language)
+    if name is None:
+        return []
+    vref = fetch(EBIBLE_RAW + "metadata/vref.txt", cache_dir / "bible" / "vref.txt").read_text(encoding="utf-8").splitlines()
+    verses = fetch(EBIBLE_RAW + f"corpus/{name}.txt", cache_dir / "bible" / f"{name}.txt").read_text(encoding="utf-8").splitlines()
+    chapters: dict[str, list[str]] = {}
+    for ref, verse in zip(vref, verses):
+        verse = verse.strip()
+        if verse and verse != "<range>":  # <range>: the verse is merged into the previous line
+            chapters.setdefault(ref.split(":")[0], []).append(verse)  # "GEN 1:1" -> "GEN 1"
+    return [doc_example(language, f"{name}:{chapter}", "bible", "\n".join(vs)) for chapter, vs in chapters.items()]
+
+
+def load_ntrex(language: str, cache_dir: Path) -> list[dict]:
+    """All 123 NTREX-128 news articles of a language, one document per article (sentences in order)."""
+    code = NTREX_FILES[language]
+    doc_ids = fetch(NTREX_RAW + "DOCUMENT_IDS.tsv", cache_dir / "ntrex" / "DOCUMENT_IDS.tsv").read_text(encoding="utf-8").splitlines()
+    lines = fetch(NTREX_RAW + f"NTREX-128/newstest2019-ref.{code}.txt",
+                  cache_dir / "ntrex" / f"newstest2019-ref.{code}.txt").read_text(encoding="utf-8").splitlines()
+    if len(lines) != len(doc_ids):
+        raise SystemExit(f"NTREX {code}: {len(lines)} sentences but {len(doc_ids)} document ids")
+    docs: dict[str, list[str]] = {}
+    for doc_id, line in zip(doc_ids, lines):
+        if line.strip():
+            docs.setdefault(doc_id.strip(), []).append(line.strip())
+    return [doc_example(language, f"ntrex:{d}", "test", "\n".join(ss)) for d, ss in docs.items()]
+
+
+def load_alt(language: str, cache_dir: Path, n_articles: int, seed: int) -> list[dict]:
+    """--alt-articles ALT articles (the same ones for every language), one document per article."""
+    import pyarrow.parquet as pq
+    out = cache_dir / "alt"
+    rows = []
+    for split in ("train", "validation", "test"):
+        path = out / f"alt-parallel-{split}.parquet"
+        if not path.is_file():
+            from huggingface_hub import hf_hub_download
+            out.mkdir(parents=True, exist_ok=True)
+            Path(hf_hub_download("mutiyama/alt", f"alt-parallel/{split}-00000-of-00001.parquet", repo_type="dataset",
+                                 local_dir=out / "hub")).replace(path)
+        rows += [{**r, "split": split} for r in pq.read_table(path).to_pylist()]
+    articles: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        articles[r["SNT.URLID"]].append(r)
+    complete = sorted(a for a, rs in articles.items()
+                      if all(all(((r["translation"] or {}).get(c) or "").strip() for r in rs) for c in ALT_CODES.values()))
+    natural = lambda x: [int(p) if p.isdigit() else p for p in re.split(r"[-.]", x)]  # "4735-2": a split sentence
+    chosen = sorted(random.Random(f"alt:{seed}").sample(complete, min(n_articles, len(complete))), key=natural)
+    code = ALT_CODES[language]
+    docs = []
+    for a in chosen:
+        rs = sorted(articles[a], key=lambda r: natural(r["SNT.URLID.SNTID"]))
+        docs.append(doc_example(language, f"alt:{a}", rs[0]["split"], "\n".join(r["translation"][code].strip() for r in rs),
+                                rs[0].get("url") or ""))
+    return docs
+
+
+def load_flores(language: str, cache_dir: Path, domain: str) -> list[dict]:
+    """FLORES+ dev + devtest sentences of one source domain (wikibooks, wikivoyage), one document per source page."""
+    from huggingface_hub import hf_hub_download
+    code = FLORES_CODES[language]
+    pages: dict[tuple, list[dict]] = {}
+    for split in ("dev", "devtest"):
+        path = cache_dir / "flores_plus" / split / f"{code}.jsonl"
+        if not path.is_file():
+            hf_hub_download("openlanguagedata/flores_plus", f"{split}/{code}.jsonl", repo_type="dataset",
+                            local_dir=cache_dir / "flores_plus")
+        for line in path.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            if r["domain"] == domain:
+                pages.setdefault((split, r["url"]), []).append(r)
+    return [doc_example(language, f"flores:{split}:{rs[0]['id']}", split,
+                        "\n".join(r["text"].strip() for r in sorted(rs, key=lambda r: r["id"])), url)
+            for (split, url), rs in pages.items()]
+
 
 def load_sib200_text(language: str) -> list[dict]:
     from huggingface_hub import hf_hub_download
@@ -390,6 +544,39 @@ def run_wikipedia(model, tokenizer, model_id: str, training_seed, languages: lis
     return {"dataset": "wikipedia", "per_language": per_language, "macro_loss": macro, "macro_bits_per_byte": macro_bpb}
 
 
+DOCUMENT_SOURCES = {"bloom": ("sil-ai/bloom-lm", "main", "book"), "bible": ("BibleNLP/ebible", "main", "chapter"),
+                    "ntrex": ("MicrosoftTranslator/NTREX", "NTREX-128", "article"), "alt": ("mutiyama/alt", "alt-parallel", "article"),
+                    "flores_wikibooks": ("openlanguagedata/flores_plus", "dev+devtest", "page"),
+                    "flores_wikivoyage": ("openlanguagedata/flores_plus", "dev+devtest", "page")}
+
+
+def run_documents(dataset: str, examples_of, model, tokenizer, model_id: str, training_seed, languages: list[str], device,
+                  use_bf16: bool, seq_len: int, stride: int, max_chars: int, out_dir: Path,
+                  start_id: int | None = None) -> dict:
+    """Score every document examples_of(language) returns (bloom, bible, ntrex, alt), exactly as Wikipedia articles;
+    a language without documents is skipped (and left out of the macro averages)."""
+    source, revision, unit = DOCUMENT_SOURCES[dataset]
+    per_language = {}
+    for language in languages:
+        examples = examples_of(language)
+        if not examples:
+            print(f"  [{dataset}/{language}] not in {source}, skipped", flush=True)
+            continue
+        records = []
+        for ex in progress(examples, desc=f"{dataset}/{language}", unit=unit):
+            nll, n = score_document(model, tokenizer, ex["text"], device, use_bf16, seq_len, stride, max_chars, start_id)
+            records.append({**ex, "nll_sum": nll, "valid_target_tokens": n,
+                            "text_bytes": len(ex["text"][:max_chars].encode("utf-8"))})
+        write_predictions(out_dir / dataset / f"{language}.csv", model_id, training_seed, source, revision, records)
+        per_language[language] = group_loss(records)
+        g = per_language[language]
+        print(f"  [{dataset}/{language}] {unit}s={g['n_documents']} loss={g['loss']:.4f} "
+              f"perplexity={g['perplexity']:.1f} bits/byte={g['bits_per_byte']:.4f}", flush=True)
+    macro = statistics.mean(v["loss"] for v in per_language.values()) if per_language else float("nan")
+    macro_bpb = statistics.mean(v["bits_per_byte"] for v in per_language.values()) if per_language else float("nan")
+    return {"dataset": dataset, "per_language": per_language, "macro_loss": macro, "macro_bits_per_byte": macro_bpb}
+
+
 def run_sib200(model, tokenizer, model_id: str, training_seed, languages: list[str], device, use_bf16: bool,
               seq_len: int, stride: int, out_dir: Path, start_id: int | None = None) -> dict:
     per_language = {}
@@ -443,6 +630,12 @@ DATASET_TITLES = {
     "wikipedia": lambda r: "Wikipedia",
     "sib200": lambda r: "SIB-200 (pooled per language)",
     "annotated": lambda r: "Human-annotated documents (all)",
+    "bloom": lambda r: f"Bloom Library storybooks (sil-ai/bloom-lm, all splits; {len(r['per_language'])} languages, no Malay)",
+    "bible": lambda r: f"Bible (eBible, whole text, one document per chapter; {len(r['per_language'])} languages, no Khmer)",
+    "ntrex": lambda r: "NTREX-128 news (all 123 articles per language)",
+    "flores_wikibooks": lambda r: "FLORES+ Wikibooks passages (dev+devtest, one document per source page)",
+    "flores_wikivoyage": lambda r: "FLORES+ Wikivoyage passages (dev+devtest, one document per source page)",
+    "alt": lambda r: f"ALT news (the same {next(iter(r['per_language'].values()))['n_documents']:,} articles per language)",
 }
 
 
@@ -544,6 +737,14 @@ def training_seed_of(run_dir: Path) -> str:
     return m.group(1) if m else "unknown"
 
 
+def document_loaders(args) -> dict:
+    cache = args.wikipedia_cache_dir
+    return {"bloom": lambda l: load_bloom(l, cache), "bible": lambda l: load_bible(l, cache),
+            "ntrex": lambda l: load_ntrex(l, cache), "alt": lambda l: load_alt(l, cache, args.alt_articles, args.seed),
+            "flores_wikibooks": lambda l: load_flores(l, cache, "wikibooks"),
+            "flores_wikivoyage": lambda l: load_flores(l, cache, "wikivoyage")}
+
+
 def main():
     global PROGRESS
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -553,11 +754,13 @@ def main():
                         help="Pretrained causal LMs: Hugging Face Hub IDs or local model folders, e.g. google/gemma-3-270m")
     parser.add_argument("--max-context", type=int, default=2048, help="--model only: context window cap")
     parser.add_argument("--datasets", nargs="+", default=["wikipedia", "sib200"],
-                        choices=["wikipedia", "sib200", "annotated", "annotated_hq"],
+                        choices=["wikipedia", "sib200", "annotated", "annotated_hq", "bloom", "bible", "ntrex", "alt",
+                                 "flores_wikibooks", "flores_wikivoyage"],
                         help="annotated = the human-annotated documents (--annotated-table), reported for all of them "
                              "and for the high-quality part; annotated_hq = only the high-quality part is scored")
     parser.add_argument("--languages", nargs="+", default=None, help="Default: all 7 project languages")
     parser.add_argument("--num-samples", type=int, default=1000, help="Wikipedia articles per language")
+    parser.add_argument("--alt-articles", type=int, default=1000, help="ALT articles (the same ones in every language)")
     parser.add_argument("--min-chars", type=int, default=200, help="Wikipedia eligibility threshold")
     parser.add_argument("--max-article-chars", type=int, default=50_000,
                         help="Truncate pathologically long Wikipedia articles before scoring (bounds worst-case "
@@ -593,6 +796,10 @@ def main():
             examples = load_wikipedia(language, args.seed, args.num_samples, args.pilot_corpus_dir, args.min_chars,
                                       args.wikipedia_cache_dir)
             print(f"  [wikipedia/{language}] {len(examples)} articles ready", flush=True)
+        for dataset, examples_of in document_loaders(args).items():
+            if dataset in args.datasets:
+                for language in languages:
+                    print(f"  [{dataset}/{language}] {len(examples_of(language))} documents ready", flush=True)
         return
     if not args.run_dir and not args.model:
         parser.error("give at least one --run-dir or --model")
@@ -632,6 +839,11 @@ def main():
                                          args.num_samples, args.pilot_corpus_dir, args.min_chars, args.device,
                                          use_bf16, seq_len, stride, args.max_article_chars, out_dir, start_id,
                                          args.wikipedia_cache_dir))
+        for dataset, examples_of in document_loaders(args).items():
+            if dataset in args.datasets:
+                results.append(run_documents(dataset, examples_of, model, tokenizer, name, training_seed, languages,
+                                             args.device, use_bf16, seq_len, stride, args.max_article_chars, out_dir,
+                                             start_id))
         if "sib200" in args.datasets:
             results.append(run_sib200(model, tokenizer, name, training_seed, languages, args.device,
                                       use_bf16, seq_len, stride, out_dir, start_id))

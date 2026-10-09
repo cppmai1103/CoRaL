@@ -2,7 +2,8 @@
 
 Replaces the hand-written scorers (eval_downstream.py, eval_wiki_sib200.py) for the 7-language runs: harness task
 configs, prompts and metrics, on the official evaluation sets. The three largest are cut to fixed subsets (SUBSETS;
---full-test-sets scores everything), the same items for every model and language, written to subsets.json:
+--full-test-sets scores all of them in full, --full-test-sets global_mmlu only that one), the same items for every
+model and language, written to subsets.json:
   belebele     500 questions per language (of 900, after the holdout)
   global_mmlu  100 questions per subject category (6 categories -> 600 per language, of 14,042), every subject kept
   flores_plus  3 devtest sentences per topic (182 topics -> 520 per language, of 1,012)
@@ -45,8 +46,12 @@ spBLEU are never averaged together).
 
 Outputs (--output-dir): results.json (harness output, with config and versions), <model>/samples_*.jsonl (every
 prompt, per-choice log-likelihood or generation), holdout.json, flores_plus/<iso>.{hyp,ref}.txt, summary.csv and
-summary.md. Compare several runs (difference from a baseline run, e.g. random selection):
+summary.md, and breakdown.csv/.md: the main metric per value of the dataset fields in BREAKDOWN (Global-MMLU culturally
+sensitive/agnostic, subject category and subject; INCLUDE regional feature, domain, level and subject; Global PIQA
+cultural score; SIB-200 topic; SEA-NLI concept category and label). Compare several runs (difference from a baseline
+run, e.g. random selection), and the breakdown of runs evaluated before it existed:
     python -m src.train_gpt2_from_scratch.eval_lm_harness compare --runs <dir> ... --baseline <dir> --output <md>
+    python -m src.train_gpt2_from_scratch.eval_lm_harness breakdown --run-dirs <dir> ...
 
 Run inside .venv/lm-eval (lm-eval on top of the sea-rater environment); see sh/eval/eval_lm_harness.sh.
     python -m src.train_gpt2_from_scratch.eval_lm_harness eval --model <hub id or merged model folder> \\
@@ -112,6 +117,22 @@ SUBSETS = {
     "global_mmlu": {"size": 100, "per": "subject_category", "cover": "subject", "key": lambda d: d["sample_id"]},
     "flores_plus": {"size": 3, "per": "topic", "key": lambda d: d["id"]},
 }
+# Dataset columns the main metric is also reported by (breakdown.csv, breakdown.md), per (benchmark, language), from the
+# logged samples. Belebele has no such column.
+BREAKDOWN = {
+    "global_mmlu": ["cultural_sensitivity_label", "subject_category", "subject"],
+    "include": ["regional_feature", "domain", "level", "subject"],
+    "global_piqa": ["approx_cultural_score"],
+    "sib200": ["category"],
+    "sea_nli_normal": ["concept_category", "true_label"],
+    "sea_nli_hard": ["concept_category", "true_label"],
+}
+BREAKDOWN_NOTES = {
+    ("global_mmlu", "cultural_sensitivity_label"): "CS = culturally sensitive, CA = culturally agnostic (annotated "
+                                                   "subset), - = not annotated",
+    ("include", "regional_feature"): "how much the question depends on regional knowledge",
+    ("global_piqa", "approx_cultural_score"): "1 = culturally specific (dataset's approximate score), 0 = not",
+}
 
 
 def expand_benchmarks(names: list[str]) -> list[str]:
@@ -155,11 +176,11 @@ def draw_subset(rows: list[dict], bench: str, seed: int) -> list[int]:
     return sorted(keep)
 
 
-def make_task_manager(shots: dict[str, int], holdout: int, seed: int, record: dict, subsets: dict | None):
+def make_task_manager(shots: dict[str, int], holdout: int, seed: int, record: dict, subsets: dict, full: set[str]):
     """A TaskManager (with the custom tasks) that, right after loading, sets each task's number of demonstrations and,
     for test-only benchmarks with k > 0, moves `holdout` seeded test items of the task family into its demonstration
-    pool (first_n sampler, fixed order) and out of every scored test split. With `subsets` (a dict, filled with the
-    selected item keys), the SUBSETS benchmarks are then cut to their fixed scored subset."""
+    pool (first_n sampler, fixed order) and out of every scored test split. The SUBSETS benchmarks not in `full` are
+    then cut to their fixed scored subset (`subsets` is filled with the selected item keys)."""
     from lm_eval.api.samplers import FirstNSampler
     from lm_eval.tasks import TaskManager
 
@@ -173,7 +194,7 @@ def make_task_manager(shots: dict[str, int], holdout: int, seed: int, record: di
                 task.set_config(key="num_fewshot", value=k)
                 if k > 0 and bench in HOLDOUT_BENCHMARKS:
                     apply_holdout(task, name, family)
-                if subsets is not None and bench in SUBSETS:
+                if bench in SUBSETS and bench not in full:
                     apply_subset(task, name, bench, family)
             return loaded
 
@@ -327,6 +348,64 @@ def write_summary(out_dir: Path, rows: list[dict], header: str):
     print("\n".join(lines), flush=True)
 
 
+def load_samples(run_dir: Path) -> dict[str, list[dict]]:
+    """Logged samples of an `eval` output folder: harness (leaf) task -> samples, from <model>/samples_<task>_<time>.jsonl."""
+    samples = {}
+    for path in sorted(run_dir.glob("*/samples_*.jsonl")):
+        task = path.stem[len("samples_"):].rsplit("_", 1)[0]
+        samples.setdefault(task, []).extend(json.loads(line) for line in path.open(encoding="utf-8"))
+    return samples
+
+
+def breakdown_rows(samples: dict[str, list[dict]]) -> list[dict]:
+    """Main metric per value of each BREAKDOWN column, per (benchmark, language), from the logged samples (each one
+    carries its dataset row in `doc` and its own metric values)."""
+    lang_of = {t: l for per_lang in TASKS.values() for l, t in per_lang.items()}
+    groups = {}
+    for name, task_samples in samples.items():
+        found = configured_task(name)
+        if not found or found[0] not in BREAKDOWN:
+            continue
+        bench, family = found
+        for s in task_samples:
+            for col in BREAKDOWN[bench]:
+                if col in s["doc"]:
+                    key = (bench, lang_of[family], col, str(s["doc"][col]))
+                    groups.setdefault(key, []).append(float(s[MAIN_METRIC[bench]]))
+    # fields in BREAKDOWN order, then languages, then values
+    order = lambda g: (g[0][0], BREAKDOWN[g[0][0]].index(g[0][2]), LANGUAGES.index(g[0][1]), g[0][3])
+    return [{"benchmark": b, "language": l, "field": c, "value": v, "metric": MAIN_METRIC[b],
+             "score": sum(x) / len(x), "n": len(x)} for (b, l, c, v), x in sorted(groups.items(), key=order)]
+
+
+def write_breakdown(out_dir: Path, rows: list[dict], header: str):
+    """breakdown.csv (one row per benchmark, language, field, value) and breakdown.md (a table per benchmark and field:
+    values x languages, plus the macro-average over the languages that have the value)."""
+    if not rows:
+        return
+    with (out_dir / "breakdown.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    lines = [header, "", "Main metric in % per value of a dataset field; macro = mean over the languages with that "
+             "value; n = scored examples over all languages. Small n: read with care.", ""]
+    for bench, col in dict.fromkeys((r["benchmark"], r["field"]) for r in rows):
+        sel = [r for r in rows if r["benchmark"] == bench and r["field"] == col]
+        langs = [l for l in LANGUAGES if any(r["language"] == l for r in sel)]
+        lines += [f"## {bench} by {col} ({MAIN_METRIC[bench]})", ""]
+        if (bench, col) in BREAKDOWN_NOTES:
+            lines += [BREAKDOWN_NOTES[bench, col], ""]
+        lines += ["| value | n | " + " | ".join(langs) + " | macro |", "|---|---|" + "---|" * (len(langs) + 1)]
+        for value in dict.fromkeys(r["value"] for r in sel):
+            cells = {r["language"]: r for r in sel if r["value"] == value}
+            scores = [c["score"] for c in cells.values()]
+            lines.append(f"| {value} | {sum(c['n'] for c in cells.values()):,} | "
+                         + " | ".join(f"{fmt(cells[l]['score'])} ({cells[l]['n']})" if l in cells else "N/A"
+                                      for l in langs) + f" | **{fmt(sum(scores) / len(scores))}** |")
+        lines.append("")
+    (out_dir / "breakdown.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def parse_shots(args) -> dict[str, int]:
     shots = {b: DEFAULT_SHOTS.get(b, args.num_fewshot) for b in TASKS}
     for item in args.shots or []:
@@ -354,7 +433,9 @@ def cmd_eval(args):
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     record = {}
-    subsets = None if args.full_test_sets else {}
+    subsets = {}
+    # --full-test-sets alone: every SUBSETS benchmark in full; with names: only those
+    full = set(SUBSETS) if args.full_test_sets == [] else set(args.full_test_sets or [])
     model_args = {"pretrained": args.model, "dtype": args.dtype, "add_bos_token": True}
     print(f"lm-eval {lm_eval.__version__} | model {args.model} | shots "
           + ", ".join(f"{b}={shots[b]}" for b in benchmarks) + f" | holdout {args.holdout} | "
@@ -364,7 +445,7 @@ def cmd_eval(args):
         model="hf", model_args=model_args, tasks=task_names, num_fewshot=None,  # set per task by the TaskManager
         batch_size=args.batch_size, max_batch_size=args.max_batch_size, device=args.device, limit=args.limit,
         log_samples=True, evaluation_tracker=tracker,
-        task_manager=make_task_manager(shots, args.holdout, args.seed, record, subsets),
+        task_manager=make_task_manager(shots, args.holdout, args.seed, record, subsets, full),
         random_seed=args.seed, numpy_random_seed=args.seed, torch_random_seed=args.seed,
         fewshot_random_seed=args.seed,
     )
@@ -384,9 +465,13 @@ def cmd_eval(args):
     if subsets:
         subset_note = ("\n\nFixed scored subsets (identical for every model; item keys in subsets.json): "
                        + ", ".join(f"{b} {SUBSETS[b]['size']} per {SUBSETS[b]['per'] or 'language'}"
-                                   for b in benchmarks if b in SUBSETS) + ".")
-    write_summary(out_dir, rows, f"# lm-evaluation-harness results: {args.model}"
-                  + (f" (--limit {args.limit}: NOT a final result)" if args.limit else "") + subset_note)
+                                   for b in benchmarks if b in SUBSETS and b not in full) + ".")
+    if full & set(benchmarks):
+        subset_note += f"\n\nComplete test sets: {', '.join(b for b in benchmarks if b in full)}."
+    header = (f"# lm-evaluation-harness results: {args.model}"
+              + (f" (--limit {args.limit}: NOT a final result)" if args.limit else "") + subset_note)
+    write_summary(out_dir, rows, header)
+    write_breakdown(out_dir, breakdown_rows(samples), header.replace("results:", "results by subset:", 1))
 
 
 def cmd_prefetch(args):
@@ -416,14 +501,12 @@ def cmd_extract(args):
     results = json.loads((src / "results.json").read_text(encoding="utf-8"))
     with (src / "summary.csv").open(encoding="utf-8") as f:
         old = [r for r in csv.DictReader(f) if r["benchmark"] in TASKS]  # drops xcopa and flores_plus rows (disabled)
-    # samples_<task>_<timestamp>.jsonl, one file per leaf task (Global-MMLU: per subject) -> family -> samples
+    # one samples file per leaf task (Global-MMLU: per subject) -> family -> samples
     by_family = {}
-    for path in sorted(src.glob("*/samples_*.jsonl")):
-        task = path.stem[len("samples_"):].rsplit("_", 1)[0]
+    for task, task_samples in load_samples(src).items():
         found = configured_task(task)
         if found and found[0] in SUBSETS:
-            by_family.setdefault(found[1], []).extend(
-                json.loads(line) for line in path.open(encoding="utf-8"))
+            by_family.setdefault(found[1], []).extend(task_samples)
     subsets, rows = {}, []
     for r in old:
         bench, lang = r["benchmark"], r["language"]
@@ -456,6 +539,17 @@ def cmd_extract(args):
                   "item keys in subsets.json): "
                   + ", ".join(f"{b} {SUBSETS[b]['size']} per {SUBSETS[b]['per'] or 'language'}" for b in benches)
                   + ".")
+
+
+def cmd_breakdown(args):
+    """breakdown.csv/.md of a finished `eval` folder from its logged samples, no GPU (runs from before BREAKDOWN)."""
+    for run_dir in args.run_dirs:
+        rows = breakdown_rows(load_samples(run_dir))
+        if not rows:
+            print(f"{run_dir}: no samples of {', '.join(BREAKDOWN)}", flush=True)
+            continue
+        write_breakdown(run_dir, rows, f"# lm-evaluation-harness results by subset: {run_dir}")
+        print(f"{run_dir}: {len(rows)} rows -> breakdown.csv, breakdown.md", flush=True)
 
 
 def cmd_compare(args):
@@ -539,9 +633,9 @@ def main(argv=None):
             p.add_argument("--holdout", type=int, default=5,
                            help="Test items per test-only task held out as its demonstrations (k-shot only)")
             p.add_argument("--seed", type=int, default=1234)
-            p.add_argument("--full-test-sets", action="store_true",
-                           help="Score the complete test sets instead of the fixed SUBSETS (Belebele, Global-MMLU, "
-                                "FLORES+)")
+            p.add_argument("--full-test-sets", nargs="*", choices=list(SUBSETS), metavar="BENCHMARK",
+                           help="Score complete test sets instead of the fixed SUBSETS (Belebele, Global-MMLU, "
+                                "FLORES+): all of them without names, or only the named ones (e.g. global_mmlu)")
             p.add_argument("--batch-size", default="auto")
             p.add_argument("--max-batch-size", type=int, default=64)
             p.add_argument("--dtype", default="bfloat16")
@@ -551,13 +645,15 @@ def main(argv=None):
     p.add_argument("--run-dir", type=Path, required=True, help="Output folder of a full-test-set `eval`")
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--num-fewshot", type=int, default=5, help="Shots column for old summaries that lack it")
+    p = sub.add_parser("breakdown", help="Scores by dataset field (BREAKDOWN) of finished `eval` folders, no GPU")
+    p.add_argument("--run-dirs", type=Path, nargs="+", required=True)
     p = sub.add_parser("compare")
     p.add_argument("--runs", nargs="+", required=True,
                    help="Output folders of `eval`; several folders of one model comma-separated (core,extra)")
     p.add_argument("--baseline", default=None, help="One of --runs (or one of its folders), e.g. the base model")
     p.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    {"eval": cmd_eval, "prefetch": cmd_prefetch, "extract": cmd_extract,
+    {"eval": cmd_eval, "prefetch": cmd_prefetch, "extract": cmd_extract, "breakdown": cmd_breakdown,
      "compare": cmd_compare}[args.command](args)
 
 

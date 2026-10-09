@@ -28,6 +28,9 @@ set -eo pipefail
 # A smaller budget from a larger nested selection (its first part, as prepare_data.py would have selected it), trained
 # as its own run (shuffled, cosine): METHOD=avg5_50M_7languages BUDGET=10M POOL_DIR=data/pilot_corpus_7languages \
 #   sbatch sh/train/lora_cpt.sh   -> checkpoints/lora_cpt/<model>/avg5_50M_7languages_budget10M_ep1_seed42/
+# Quality-weighted loss on another selection's documents (docs/05_loss.md): METHOD=wavg5_50M_7languages \
+#   TRAIN_DATA=data/pilot_selected/random_50M_7languages/documents.csv LOSS_WEIGHT_SCORES=data/pilot_scores_7languages/avg5_mean \
+#   POOL_DIR=data/pilot_corpus_7languages sbatch sh/train/lora_cpt.sh
 
 METHOD="${METHOD:-random_20M}"
 MODEL="${MODEL:-google/gemma-3-270m}"
@@ -43,6 +46,7 @@ POOL_DIR="${POOL_DIR:-}"               # default data/pilot_corpus (validation/t
 SEQ_LEN="${SEQ_LEN:-}"                 # default 1024
 WEIGHT_DECAY="${WEIGHT_DECAY:-}"       # default 0.0
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-}" # default 8; lower it with long sequences (Gemma's 262k-vocab logits)
+LOSS_WEIGHT_SCORES="${LOSS_WEIGHT_SCORES:-}"   # e.g. data/pilot_scores_7languages/avg5_mean: quality-weighted loss
 ARGS=(--model "$MODEL" --epochs "$EPOCHS" --seed "$SEED" --lora-r "$LORA_R" --lora-alpha "$LORA_ALPHA" --lr "$LR"
       --micro-batch-size "$MICRO_BATCH_SIZE")
 [ -n "$SEQ_LEN" ] && ARGS+=(--seq-len "$SEQ_LEN")
@@ -52,11 +56,12 @@ ARGS=(--model "$MODEL" --epochs "$EPOCHS" --seed "$SEED" --lora-r "$LORA_R" --lo
 [ -n "$BUDGET" ] && ARGS+=(--budget "$BUDGET")
 [ -n "$TRAIN_DATA" ] && ARGS+=(--train-data "$TRAIN_DATA")
 [ -n "$POOL_DIR" ] && ARGS+=(--pool-dir "$POOL_DIR")
+[ -n "$LOSS_WEIGHT_SCORES" ] && ARGS+=(--loss-weight-scores "$LOSS_WEIGHT_SCORES")
 if [ "$METHOD" = "base" ]; then ARGS+=(--eval-base-only); else ARGS+=(--method "$METHOD"); fi
 ENVIRONMENT_NAME="sea-rater"
 
 cd "$SLURM_SUBMIT_DIR"
-echo "Working directory: $(pwd) | METHOD=$METHOD${BUDGET:+ | BUDGET=$BUDGET} | MODEL=$MODEL | LoRA r=$LORA_R alpha=$LORA_ALPHA | LR=$LR | EPOCHS=$EPOCHS | SEED=$SEED"
+echo "Working directory: $(pwd) | METHOD=$METHOD${BUDGET:+ | BUDGET=$BUDGET}${LOSS_WEIGHT_SCORES:+ | loss weighted by $LOSS_WEIGHT_SCORES} | MODEL=$MODEL | LoRA r=$LORA_R alpha=$LORA_ALPHA | LR=$LR | EPOCHS=$EPOCHS | SEED=$SEED"
 
 source /apps/local/anaconda3/etc/profile.d/conda.sh
 conda activate ${ENVIRONMENT_NAME}
