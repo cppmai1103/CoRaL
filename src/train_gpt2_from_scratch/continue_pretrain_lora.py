@@ -45,6 +45,10 @@ scheduler and RNG states go to <output-dir>/checkpoint/ (the previous one is rep
 crash or a kill resumes from it (--no-resume starts over), training exactly the batches the uninterrupted run would have;
 a checkpoint made with other training settings is refused. It is deleted once the final model is saved.
 
+Multi-GPU: launched with torchrun, the run is split over the GPUs (same batches and updates as on one GPU, see
+train_gpt2.train); rank 0 alone writes the logs, checkpoints, final evaluation and model:
+    torchrun --standalone --nproc_per_node 2 -m src.train_gpt2_from_scratch.continue_pretrain_lora --method ...
+
 Run from the project root (GPU):
     python -m src.train_gpt2_from_scratch.continue_pretrain_lora --eval-base-only
     python -m src.train_gpt2_from_scratch.continue_pretrain_lora --method avg4_20M
@@ -57,7 +61,9 @@ Run from the project root (GPU):
 
 import argparse
 import csv
+import datetime
 import json
+import os
 import shutil
 import sys
 import time
@@ -240,6 +246,19 @@ def main(argv=None):
     budget = parse_budget(args.budget) if args.budget else None
     if args.loss_weight_scores and (budget or args.eval_base_only):
         raise SystemExit("--loss-weight-scores cannot be combined with --budget or --eval-base-only")
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    if world > 1:  # torchrun
+        if args.eval_base_only or args.loss_weight_scores:
+            raise SystemExit("Multi-GPU runs support ordinary training only (no --eval-base-only, --loss-weight-scores)")
+        import torch.distributed as dist
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        args.device = f"cuda:{local_rank}"
+        # rank 0 evaluates and saves while the others wait at a barrier: allow far longer than the 10-minute default
+        dist.init_process_group("nccl", timeout=datetime.timedelta(hours=3), device_id=torch.device(args.device))
+    is_main = int(os.environ.get("RANK", "0")) == 0
+    if not is_main:
+        sys.stdout = open(os.devnull, "w")  # one copy of the log (rank 0); errors still reach stderr
     method_name = f"{args.method}_budget{budget_label(budget)}" if budget else args.method
     run_name = "base" if args.eval_base_only else f"{method_name}_ep{args.epochs}_seed{args.seed}"
     out_dir = args.output_dir or args.output_root / short_name(args.model) / run_name
@@ -299,9 +318,10 @@ def main(argv=None):
     import transformers
     config = {**{k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
               "vocab_size": len(tokenizer), "torch": torch.__version__, "transformers": transformers.__version__}
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
-    tokenizer.save_pretrained(out_dir / "tokenizer")
+    if is_main:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "config.json").write_text(json.dumps({**config, "gpus": world}, indent=2), encoding="utf-8")
+        tokenizer.save_pretrained(out_dir / "tokenizer")
     args.checkpoint_dir = None if args.eval_base_only else out_dir / "checkpoint"
     # settings a resumed run must share with the checkpoint (anything that changes the batches or the optimization)
     args.checkpoint_fingerprint = {k: str(v) for k, v in vars(args).items() if k in (
@@ -309,10 +329,13 @@ def main(argv=None):
         "seq_len", "lr", "weight_decay", "warmup_ratio", "batch_size", "loss_weight_scores", "weight_offset",
         "weight_scale", "normalize_per_language", "limit_docs")}
     resume_step = base.Checkpointer.saved_step(args.checkpoint_dir) if args.resume else None
-    if args.checkpoint_dir and not args.resume and args.checkpoint_dir.exists():
+    if is_main and args.checkpoint_dir and not args.resume and args.checkpoint_dir.exists():
         shutil.rmtree(args.checkpoint_dir)
+    if world > 1:
+        dist.barrier()
     eval_log = base.CsvLog(out_dir / "eval_log.csv", ["step", "epoch", "tokens_consumed", "split", "language", "loss",
-                                                      "perplexity", "target_tokens"], keep_upto_step=resume_step)
+                                                      "perplexity", "target_tokens"],
+                           keep_upto_step=resume_step) if is_main else base.NullLog()
 
     results = {"config": config, "parameters": n_params, "trainable_parameters": n_trainable}
     steps, tokens = 0, 0
@@ -328,6 +351,10 @@ def main(argv=None):
         if budget_info:
             results["data"]["budget"] = {"tokens_per_language": budget, "selection": budget_info}
         steps, tokens = run["steps"], run["tokens_consumed"]
+        if world > 1:
+            dist.destroy_process_group()  # the rest (final evaluation, saving) runs on rank 0 alone
+            if not is_main:
+                return
 
     print("Final evaluation ...", flush=True)
     started = time.time()

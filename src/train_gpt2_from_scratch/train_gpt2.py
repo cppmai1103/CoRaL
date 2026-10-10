@@ -457,9 +457,35 @@ def run_sanity_check(model, train_blocks, tokenizer, args, device, use_bf16) -> 
 # Training
 # --------------------------------------------------------------------------
 
+def dist_info() -> tuple[int, int]:
+    """(rank, world size) under torchrun once the caller has initialised torch.distributed, else (0, 1)."""
+    import torch.distributed as dist
+    return (dist.get_rank(), dist.get_world_size()) if dist.is_available() and dist.is_initialized() else (0, 1)
+
+
+class NullLog:
+    """Stands in for CsvLog on the non-main ranks of a multi-GPU run (only rank 0 writes the logs)."""
+
+    def write(self, row: dict) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, out_dir: Path, eval_log: CsvLog):
     from transformers import get_cosine_schedule_with_warmup
 
+    # Multi-GPU (torchrun): every rank takes the same batches; rank r runs micro-batches r, r + world, ... of each
+    # step and the gradients are summed across ranks, so a step is the same update as on one GPU. Rank 0 alone
+    # evaluates, logs and saves checkpoints while the others wait.
+    rank, world = dist_info()
+    is_main = rank == 0
+    if args.batch_size % (args.micro_batch_size * world):
+        raise SystemExit(f"--batch-size {args.batch_size} must be a multiple of --micro-batch-size x GPUs "
+                         f"({args.micro_batch_size} x {world})")
+    if world > 1:
+        import torch.distributed as dist
     n_blocks = train_blocks["input_ids"].size(0)
     steps_per_epoch = n_blocks // args.batch_size
     if steps_per_epoch == 0:
@@ -476,14 +502,18 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
                   for e in range(args.epochs) for k in range(1, args.evals_per_epoch + 1)}
     train_log = CsvLog(out_dir / "train_log.csv",
                        ["step", "epoch", "tokens_consumed", "train_loss", "lr", "tokens_per_sec", "peak_mem_gib"],
-                       keep_upto_step=start_step if resumed else None)
+                       keep_upto_step=start_step if resumed else None) if is_main else NullLog()
     print(f"Training: {n_blocks} blocks/epoch -> {steps_per_epoch} steps/epoch x {args.epochs} epochs = {total_steps} steps "
-          f"({args.batch_size} sequences x {args.seq_len} tokens per step; {dropped} blocks left out per epoch)")
+          f"({args.batch_size} sequences x {args.seq_len} tokens per step{f', split over {world} GPUs' if world > 1 else ''}; "
+          f"{dropped} blocks left out per epoch)")
 
     if args.eval_at_start and not resumed:
-        result = evaluate(model, val_blocks, languages, args.eval_batch_size, device, use_bf16, desc="validation @ step 0", nested=True)
-        log_eval(eval_log, result, "validation", 0, 0.0, 0)
-        print(f"  step 0 validation: {format_eval(result)}", flush=True)
+        if is_main:
+            result = evaluate(model, val_blocks, languages, args.eval_batch_size, device, use_bf16, desc="validation @ step 0", nested=True)
+            log_eval(eval_log, result, "validation", 0, 0.0, 0)
+            print(f"  step 0 validation: {format_eval(result)}", flush=True)
+        if world > 1:
+            dist.barrier()
 
     tokens_consumed, step = (resumed["tokens_consumed"], start_step) if resumed else (0, 0)
     window_loss, window_steps, window_tokens = 0.0, 0, 0
@@ -504,12 +534,21 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
             model.train()
             optimizer.zero_grad(set_to_none=True)
             step_loss = 0.0
-            for m in range(0, ids.size(0), args.micro_batch_size):
+            for m in range(rank * args.micro_batch_size, ids.size(0), world * args.micro_batch_size):
                 loss_sum, _ = block_losses(model, ids[m:m + args.micro_batch_size], mask[m:m + args.micro_batch_size],
                                            device, use_bf16)
                 loss = loss_sum.sum() / targets
                 loss.backward()
                 step_loss += loss.item()
+            if world > 1:
+                grads = [p.grad for p in model.parameters() if p.requires_grad and p.grad is not None]
+                flat = torch.cat([g.reshape(-1) for g in grads] + [torch.tensor([step_loss], device=grads[0].device)])
+                dist.all_reduce(flat)
+                offset = 0
+                for g in grads:
+                    g.copy_(flat[offset:offset + g.numel()].view_as(g))
+                    offset += g.numel()
+                step_loss = flat[-1].item()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
             scheduler.step()
@@ -533,13 +572,17 @@ def train(model, train_blocks, val_blocks, languages, args, device, use_bf16, ou
                                  "lr": lr, "tokens_per_sec": window_tokens / elapsed, "peak_mem_gib": round(peak, 2)})
                 window_loss, window_steps, window_tokens, window_start = 0.0, 0, 0, time.time()
             if step in eval_steps and step != total_steps:
-                result = evaluate(model, val_blocks, languages, args.eval_batch_size, device, use_bf16,
-                                  desc=f"validation @ step {step}", nested=True)
-                log_eval(eval_log, result, "validation", step, step / steps_per_epoch, tokens_consumed)
-                history.append({"step": step, "epoch": step / steps_per_epoch, "tokens": tokens_consumed,
-                                "validation": result["macro"]})
-                print(f"  step {step} (epoch {step / steps_per_epoch:.2f}) validation: {format_eval(result)}", flush=True)
-            checkpointer.maybe_save(step, total_steps, {"tokens_consumed": tokens_consumed, "history": history})
+                if is_main:
+                    result = evaluate(model, val_blocks, languages, args.eval_batch_size, device, use_bf16,
+                                      desc=f"validation @ step {step}", nested=True)
+                    log_eval(eval_log, result, "validation", step, step / steps_per_epoch, tokens_consumed)
+                    history.append({"step": step, "epoch": step / steps_per_epoch, "tokens": tokens_consumed,
+                                    "validation": result["macro"]})
+                    print(f"  step {step} (epoch {step / steps_per_epoch:.2f}) validation: {format_eval(result)}", flush=True)
+                if world > 1:
+                    dist.barrier()
+            if is_main:
+                checkpointer.maybe_save(step, total_steps, {"tokens_consumed": tokens_consumed, "history": history})
         bar.close()
 
     train_log.close()
