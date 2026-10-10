@@ -13,6 +13,7 @@ Every run is LoRA continued pretraining (r=16, alpha=32, 1 epoch, seed 42) of a 
 | cult | top documents by the cultural-nuances rater |
 | avg5 | top documents by the mean of the 5 rater scores |
 | rr5 | round-robin over the 5 rater rankings |
+| rr4 | round-robin over 4 rater rankings: rr5 without cultural nuances (OLMo only) |
 
 OLMo selections count tokens with the OLMo tokenizer; Gemma selections count them with the Gemma tokenizer. Per-run outputs are in `checkpoints/lora_cpt/<model>/<run>_50M_7languages_ep1_seed42/` (Hub: `cppmai/sea7-checkpoints`), with full per-language tables in the `*_comparison.md` files of each model folder.
 
@@ -41,11 +42,12 @@ Macro-average over the languages of each set.
 | | edu | 1.0190 (−0.1288) | **0.9686 (−0.1159)** | 1.0578 (−0.1031) | 1.0254 (−0.1330) | 0.9837 (−0.1781) | 0.9761 (−0.2354) | **0.9925 (−0.2339)** |
 | | cult | 1.0403 (−0.1075) | 0.9841 (−0.1005) | 1.0753 (−0.0856) | 1.0352 (−0.1231) | 1.0136 (−0.1482) | 1.0573 (−0.1542) | 1.0635 (−0.1629) |
 | | avg5 | 1.0130 (−0.1348) | 0.9817 (−0.1029) | 1.0618 (−0.0992) | 1.0219 (−0.1365) | 0.9705 (−0.1912) | 0.9919 (−0.2195) | 1.0119 (−0.2145) |
-| | rr5 | **1.0087 (−0.1391)** | 0.9706 (−0.1140) | **1.0538 (−0.1071)** | 1.0005 (−0.1578) | 0.9581 (−0.2036) | **0.9758 (−0.2356)** | 0.9953 (−0.2310) |
+| | rr5 | **1.0087 (−0.1391)** | 0.9706 (−0.1140) | **1.0538 (−0.1071)** | 1.0005 (−0.1578) | 0.9581 (−0.2036) | 0.9758 (−0.2356) | 0.9953 (−0.2310) |
+| | rr4 | 1.0116 (−0.1362) | 0.9838 (−0.1008) | 1.0607 (−0.1002) | 1.0003 (−0.1580) | 0.9499 (−0.2119) | **0.9713 (−0.2402)** | 0.9929 (−0.2335) |
 
 OLMo random and wavg5 tie on NTREX at four decimals (wavg5 is lower in later digits).
 
-FineWeb2 test split (1,000 random web documents per language, same distribution as the training pool; OLMo only): base 1.1653, random 0.9439 (−0.2214), wavg5 0.9446 (−0.2207).
+FineWeb2 test split (1,000 random web documents per language, same distribution as the training pool; OLMo only): base 1.1653, random 0.9439 (−0.2214), wavg5 0.9446 (−0.2207). Test loss (per token, from training): random 1.5993, rr5 1.6080, rr4 1.6156, edu 1.6350, avg5 1.6386, cult 1.6769.
 
 ## Table 2. 5-shot benchmarks (accuracy %, higher is better)
 
@@ -67,6 +69,7 @@ Macro-average over languages per benchmark; *overall* = mean of Belebele, Global
 | | cult | 25.91 (−0.60) | 49.89 (+2.11) | 25.04 (−0.20) | 25.13 (−0.23) | 24.51 (−2.10) | **39.08 (0.00)** | 31.49 (+0.27) |
 | | avg5 | 25.97 (−0.54) | 50.11 (+2.32) | 24.62 (−0.62) | 25.59 (+0.24) | 25.00 (−1.61) | 37.45 (−1.62) | 31.57 (+0.35) |
 | | rr5 | **26.49 (−0.03)** | **52.21 (+4.42)** | 24.90 (−0.34) | 25.63 (+0.27) | 26.47 (−0.14) | 37.76 (−1.32) | **32.31 (+1.08)** |
+| | rr4 | 25.91 (−0.60) | 49.47 (+1.68) | 24.78 (−0.46) | 25.76 (+0.40) | 28.36 (+1.75) | 38.24 (−0.84) | 31.48 (+0.26) |
 
 Chance = 1 / number of options; majority answer = accuracy of always giving the most frequent label of the scored items (SIB-200: science/technology, 51 of 204 sentences per language). SEA-NLI pools normal (1,105 items) and hard (561 items) over all languages: 1,666 questions.
 
@@ -89,6 +92,7 @@ Subsets from the datasets' own annotations (`eval_lm_harness breakdown`). Questi
 | | cult | 24.02 (+0.20) | **25.57 (+0.76)** | 50.00 (+3.16) | **27.90 (+2.46)** |
 | | avg5 | 22.24 (−1.57) | 24.62 (−0.19) | 49.76 (+2.91) | 27.30 (+1.86) |
 | | rr5 | 23.23 (−0.59) | 25.48 (+0.67) | **52.43 (+5.58)** | 26.33 (+0.88) |
+| | rr4 | 25.39 (+1.57) | 25.00 (+0.19) | 48.54 (+1.70) | 25.22 (−0.22) |
 
 Gemma's CS subset has only 136 questions and its base scores far below chance, so its CS deltas are mostly noise; OLMo's CS scores (3,168 questions) stay within ~2.5 points of chance.
 
@@ -101,8 +105,9 @@ Does selection help each language? **Perplexity**: mean relative change in bits 
 | Method | burmese | fil | indo | khmer | malay | thai | vie |
 |---|---|---|---|---|---|---|---|
 | wavg5 | −0.06% (5/7) | −0.17% (7/7) | −0.05% (5/7) | +0.01% (2/6) | −0.06% (4/6) | −0.15% (7/7) | −0.03% (5/7) |
-| rr5 | **−1.11% (5/7)** | −1.13% (5/7) | −0.15% (5/7) | +0.39% (3/6) | −0.09% (3/6) | −0.42% (5/7) | **−0.55% (5/7)** |
-| edu | +1.12% (3/7) | **−1.72% (5/7)** | +0.32% (4/7) | +5.23% (0/6) | −0.25% (3/6) | −0.33% (5/7) | +1.20% (3/7) |
+| rr5 | **−1.11% (5/7)** | −1.13% (5/7) | −0.15% (5/7) | +0.39% (3/6) | −0.09% (3/6) | **−0.42% (5/7)** | −0.55% (5/7) |
+| rr4 | +0.81% (3/7) | **−1.72% (6/7)** | **−0.36% (5/7)** | +1.51% (2/6) | **−1.04% (5/6)** | −0.13% (3/7) | **−0.71% (5/7)** |
+| edu | +1.12% (3/7) | −1.72% (5/7) | +0.32% (4/7) | +5.23% (0/6) | −0.25% (3/6) | −0.33% (5/7) | +1.20% (3/7) |
 | avg5 | +0.59% (5/7) | −0.07% (3/7) | +0.85% (2/7) | +2.78% (1/6) | +0.57% (2/6) | +0.44% (4/7) | +1.21% (2/7) |
 | cult | +1.34% (3/7) | +5.04% (1/7) | +3.87% (0/7) | +5.22% (0/6) | +5.99% (0/6) | +3.14% (2/7) | +3.60% (1/7) |
 
@@ -122,9 +127,11 @@ Does selection help each language? **Perplexity**: mean relative change in bits 
 | OLMo, Global PIQA | rr5 | – | +7.4 | 0.0 | – | +2.1 | +5.3 | +3.2 |
 | | edu | – | +2.1 | +2.1 | – | +4.2 | −3.2 | −1.1 |
 | | avg5 | – | 0.0 | +1.1 | – | +1.1 | +4.2 | +1.1 |
+| | rr4 | – | +5.3 | −3.2 | – | +1.1 | +5.3 | −4.2 |
 | OLMo, SIB-200 | edu | +2.9 | +2.0 | +2.0 | +1.0 | +0.5 | +1.5 | −4.9 |
 | | rr5 | +4.4 | −3.4 | −4.4 | +3.4 | −5.9 | 0.0 | −4.9 |
 | | avg5 | +0.5 | −3.9 | −7.4 | +0.5 | −7.4 | +1.0 | −4.4 |
+| | rr4 | +3.4 | +1.0 | −1.0 | +2.5 | −2.5 | +2.0 | −2.9 |
 | Gemma, SIB-200 | edu | −0.5 | 0.0 | +2.0 | +2.9 | +6.9 | +2.5 | −0.5 |
 | | avg5 | −1.5 | +0.5 | +3.4 | +0.5 | +5.4 | +2.0 | +2.9 |
 | | rr5 | 0.0 | +0.5 | +2.0 | +2.0 | +5.4 | +3.9 | +1.5 |
@@ -135,15 +142,15 @@ Does selection help each language? **Perplexity**: mean relative change in bits 
 |---|---|---|
 | Filipino | Yes, most consistently: better under almost every method for both models; OLMo rr5 +7.4 on Global PIQA | edu (OLMo −1.7%, Gemma −0.8%), rr5 |
 | Burmese | Yes with rr5 on OLMo (−1.1%) and edu on Gemma (−0.6%); edu and avg5 hurt OLMo | rr5 (OLMo), edu (Gemma) |
-| Vietnamese | Slightly with rr5 (OLMo −0.55%); edu and avg5 hurt OLMo (+1.2%) | rr5 |
+| Vietnamese | Slightly with rr4 / rr5 (OLMo −0.71% / −0.55%); edu and avg5 hurt OLMo (+1.2%) | rr4 / rr5 |
 | Thai | Slightly on OLMo (rr5 −0.4%, edu −0.3%; rr5 +5.3 on Global PIQA); neutral or slightly worse on Gemma | rr5 (OLMo) |
-| Indonesian | Neutral on perplexity (best methods within ±0.3%) | – |
-| Malay | Neutral on perplexity, but the largest and most consistent Gemma SIB-200 gains (+5.4 to +6.9 for every selection) | edu (Gemma) |
+| Indonesian | Nearly neutral on perplexity (best: OLMo rr4 −0.36%; other methods within ±0.3%) | rr4 (OLMo) |
+| Malay | Yes with OLMo rr4 (−1.04%, 5/6 sets), otherwise neutral; the largest and most consistent Gemma SIB-200 gains (+5.4 to +6.9 for every selection) | rr4 (OLMo), edu (Gemma) |
 | Khmer | **No: selection hurts for both models.** Every selection is worse than random on almost every set (OLMo edu +5.2%, 0/6 sets; Gemma rr5 +1.7%, 0/6) | random |
 
 - Selection helps some languages, not all: the best methods (rr5 for OLMo, edu for Gemma) lower perplexity in 4-5 of 7 languages, mostly Filipino, Burmese and Vietnamese, never in Khmer.
 - **Khmer is the clear failure case** for both models and all four selections. A plausible cause is the Khmer rater scores (less reliable, or the top-scored Khmer documents cover a narrow set of topics); to check: the raters' per-language test errors and the content of the top-scored Khmer documents.
-- rr5 is the most language-robust selection on OLMo (better in 5 languages, at most +0.4% worse elsewhere); edu varies most (best for Filipino, worst for Khmer). cult hurts every language for both models; wavg5 stays within ±0.2% everywhere.
+- rr5 is the most language-robust selection on OLMo (better in 5 languages, at most +0.4% worse elsewhere); edu varies most (best for Filipino, worst for Khmer). rr4 (rr5 without cultural nuances) is better than rr5 for Filipino, Indonesian, Malay and Vietnamese but worse for Burmese and Khmer. cult hurts every language for both models; wavg5 stays within ±0.2% everywhere.
 - Per-language benchmark differences are mostly within noise; the one consistent pattern is Gemma SIB-200 in Malay (+5 to +7 points for every selection).
 
 ## Table 5. Best setting per language
@@ -153,12 +160,12 @@ Ranking of every run (including `base` and `random`) per language by the mean bi
 | Language | Best Gemma setting | Gemma runner-up | Best OLMo setting | OLMo runner-up | How clear |
 |---|---|---|---|---|---|
 | burmese | **edu** 0.6250 (−0.4%) | random 0.6276 | **rr5** 0.7277 (−0.6%) | wavg5 0.7316 | clear for OLMo, small for Gemma |
-| fil | **edu** 1.0341 (−0.8%) | rr5 1.0370 | **edu** 1.2281 (−1.7%) | rr5 1.2356 | clear for both (largest selection gain) |
-| indo | **edu** 0.8836 (−0.1%) | rr5 0.8838 | **rr5** 1.2028 (−0.2%) | wavg5 1.2042 | near tie with random |
+| fil | **edu** 1.0341 (−0.8%) | rr5 1.0370 | **edu** 1.2281 (−1.8%) | rr4 1.2284 | clear for both (largest selection gain) |
+| indo | **edu** 0.8836 (−0.1%) | rr5 0.8838 | **rr4** 1.2003 (−0.4%) | rr5 1.2028 | small (near tie with random for Gemma) |
 | khmer | **base** (no training) 0.5820 | random 0.6163 | **random** 0.7167 | wavg5 0.7168 | clear: selection does not help |
-| malay | **edu** 0.9611 (−0.3%) | rr5 0.9624 | **edu** 1.2073 (−0.3%) | rr5 1.2095 | small, same for both models |
+| malay | **edu** 0.9611 (−0.3%) | rr5 0.9624 | **rr4** 1.1981 (−1.1%) | edu 1.2073 | clear for OLMo, small for Gemma |
 | thai | **random** 0.4552 | edu 0.4555 | **rr5** 0.7029 (−0.5%) | edu 0.7038 | tie for Gemma, small gain for OLMo |
-| vie | **rr5** 0.7598 (−0.1%) | edu 0.7601 | **rr5** 1.1518 (−0.6%) | wavg5 1.1585 | clear for OLMo, tie for Gemma |
+| vie | **rr5** 0.7598 (−0.1%) | edu 0.7601 | **rr4** 1.1503 (−0.7%) | rr5 1.1518 | clear for OLMo, tie for Gemma |
 
 Benchmark winners per language (accuracy %; only the two benchmarks above chance; with 95-204 questions per language, gaps under ~3-5 points are noise):
 
@@ -167,9 +174,9 @@ Benchmark winners per language (accuracy %; only the two benchmarks above chance
 | burmese | – / cult 65.2 (random 64.7) | – / rr5 20.1 (random 15.7) |
 | fil | edu 56.8 (random 54.7) / base 68.6 | rr5 53.7 (random 46.3) / edu 37.3 (random 35.3) |
 | indo | avg5 68.4 / avg5 73.0 (random 69.6) | edu 50.5 / edu 42.6 |
-| khmer | – / edu 68.6 (random 65.7) | – / base 21.1 |
+| khmer | – / edu 68.6 (random 65.7) | – / base and rr5 21.1 |
 | malay | edu 55.8 (random 53.7) / edu 75.5 (random 68.6) | edu 53.7 (random 49.5) / edu 40.2 |
-| thai | avg5 58.9 / base 72.5 (random 67.6) | rr5 54.7 (random 49.5) / edu 20.1 |
+| thai | avg5 58.9 / base 72.5 (random 67.6) | rr5 and rr4 54.7 (random 49.5) / rr4 20.6 |
 | vie | random 67.4 / avg5 75.5 | rr5 52.6 (random 49.5) / random 28.4 |
 
 **Recommended setting per language**
@@ -177,17 +184,17 @@ Benchmark winners per language (accuracy %; only the two benchmarks above chance
 | Language | Recommendation | Reason |
 |---|---|---|
 | fil | **edu** (rr5 close behind) | best perplexity for both models by the largest margins, and the best benchmarks |
-| malay | **edu** | best perplexity for both models and the clearest benchmark gains (Gemma SIB-200 +6.9) |
+| malay | **edu** (Gemma) / **rr4** (OLMo) | best perplexity per model and the clearest benchmark gains (Gemma SIB-200 +6.9) |
 | burmese | **edu** (Gemma) / **rr5** (OLMo) | small but consistent wins |
-| vie | **rr5** | best for both models (small for Gemma, clearer for OLMo) |
+| vie | **rr5** (Gemma) / **rr4** (OLMo, rr5 close behind) | best per model (small for Gemma, clearer for OLMo) |
 | thai | **rr5** (OLMo) / no change needed (Gemma) | for Gemma, random, edu and rr5 are within 0.1% |
-| indo | any; **edu** or **rr5** | every method within 0.2% |
+| indo | **edu** (Gemma) / **rr4** (OLMo) | small margins (Gemma within 0.2%, OLMo rr4 −0.4%) |
 | khmer | **no selection**: random for OLMo; for Gemma, no continued pretraining | every selection is worse; Gemma is best untrained |
 
-- **edu and rr5 are the two selections worth keeping**: between them they win 6 of 7 languages for both models; avg5, cult and wavg5 never win a language on perplexity.
-- **The best choice is language-specific**: edu for Filipino, Malay and Burmese, rr5 for Vietnamese and Thai, no selection for Khmer.
+- **edu and the round-robins (rr5, rr4) are the selections worth keeping**: they win 6 of 7 languages for both models (OLMo: rr4 for Indonesian, Malay and Vietnamese, rr5 for Burmese and Thai, edu for Filipino); avg5, cult and wavg5 never win a language on perplexity.
+- **The best choice is language-specific**: for Gemma, edu for Filipino, Malay, Burmese and Indonesian, rr5 for Vietnamese; for OLMo, edu for Filipino, rr4 for Indonesian, Malay and Vietnamese, rr5 for Burmese and Thai; no selection for Khmer.
 - **It also depends on the target text type**: per held-out set, edu wins both FLORES sets in almost every language, while random (or wavg5) wins NTREX and ALT news in most languages. For news-like target text random is the safer choice; for educational or encyclopedic text, edu.
-- Margins are small (under 1% bits per byte except Filipino and Khmer) and every run uses a single seed (42); a second seed for edu, rr5 and random would show whether the per-language ranking is stable.
+- Margins are small (under 1% bits per byte except Filipino and Khmer) and every run uses a single seed (42); a second seed for edu, rr5, rr4 and random would show whether the per-language ranking is stable.
 
 ## 2. Observations
 
@@ -195,8 +202,9 @@ Benchmark winners per language (accuracy %; only the two benchmarks above chance
 - **Training helps OLMo on every held-out set** (−0.09 to −0.24 bits per byte), most on news and FLORES. **Gemma gets worse than its base** on Wikipedia, the storybooks and the Bible with every training set, and improves only on news and FLORES.
 - **Rater selection is a domain trade-off, not a uniform gain.** edu and rr5 are best on book-like and encyclopedic text (Wikipedia, storybooks, the Bible, both FLORES sets), while random (and wavg5) are best on news (NTREX, ALT); avg5, edu and cult lose most on news. Both models show this pattern.
 - **rr5 is the best OLMo method overall**: best benchmark average (32.31, +1.08 over base, driven by Global PIQA +4.4), best on 3 of 7 perplexity sets, and the smallest loss on news among the selections.
+- **rr4 vs rr5 isolates the cultural-nuances dimension** (OLMo). Removing it costs Global PIQA (49.5 vs 52.2), entirely on the culturally specific questions (48.5 vs 52.4, back to random's 48.5; on the 63 other questions rr4 is higher), and lowers the benchmark average to random's level (31.48). On perplexity, cultural nuances helps culture-rich narrative text (storybooks −0.013, Bible −0.007, Wikipedia −0.003 bits per byte for rr5) and Burmese and Khmer, while rr4 is slightly better on translated news and FLORES (ALT −0.008, Wikibooks −0.005) and on Filipino, Indonesian, Malay and Vietnamese. With one seed, the 3.9-point gap on 412 culturally specific questions is suggestive, not conclusive.
 - **cult is the weakest selection on perplexity for both models** (OLMo: worse than random on all 7 sets; Gemma: on 6 of 7) and no better than random on the overall benchmark average. On the culture-related subsets it is mixed: OLMo cult is best on INCLUDE region-implicit and Global-MMLU culturally sensitive questions (+0.8 / +2.5 over base), but plain random training gains most on INCLUDE culture questions (+5.3 OLMo, +5.5 Gemma).
 - **wavg5 is indistinguishable from random**: within ~0.001 bits per byte on every set and within ~0.7 points on every benchmark. It is consistently a little better on clean or edited text and a little worse on random web text, but the effect is ~100 times smaller than training itself.
 - **The effect of selection differs by language** (Table 4): the best selections help Filipino, Burmese and Vietnamese most, are neutral for Indonesian and Malay, and hurt Khmer for every method and both models.
-- **The best setting is language-specific** (Table 5): edu for Filipino, Malay and Burmese, rr5 for Vietnamese and Thai, no selection for Khmer (for Gemma, the untrained base is best on Khmer).
+- **The best setting is language-specific** (Table 5): mostly edu for Gemma; for OLMo edu (Filipino), rr4 (Indonesian, Malay, Vietnamese) or rr5 (Burmese, Thai); no selection for Khmer (for Gemma, the untrained base is best on Khmer).
 - **Benchmarks are mostly at chance.** Belebele, INCLUDE, Global-MMLU and SEA-NLI sit at chance or majority-answer level for every model (no model beats the 39.9% SEA-NLI majority answer), so their differences are noise. Global PIQA (both models) and SIB-200 (Gemma) are the only benchmarks that separate the runs; on culturally specific Global PIQA questions the rater selections lead (OLMo rr5 +5.6 over base against +1.7 for random).
