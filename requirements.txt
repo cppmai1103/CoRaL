@@ -4,7 +4,7 @@
 #   pip install -r requirements.txt
 
 transformers==5.14.1   # pinned like sh/rater/finetune.sh and sh/train/train_gpt2.sh
-huggingface_hub
+huggingface_hub>=1.5,<2   # transformers 5.14.1 rejects hub 2.x
 tokenizers             # sh/data/train_tokenizer.sh
 peft                   # sh/train/lora_cpt.sh
 tqdm
@@ -14,3 +14,5 @@ pyarrow
 pyyaml                 # src/upload_to_huggingface.py
 datatrove              # sh/data/prepare_corpus_7languages.sh (FineWeb2 reader + banned-words list)
 myanmartools           # Burmese Zawgyi detection
+datasets               # src/train_gpt2_from_scratch/lm_eval_tasks/flores_plus
+sacrebleu              # src/train_gpt2_from_scratch/eval_lm_harness.py (chrF++/spBLEU)
