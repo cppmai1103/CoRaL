@@ -11,7 +11,10 @@
 # a crash or kill resumes from the last one.
 #
 # Run from anywhere:  bash sh/pipelines/run_olmo_cult_2gpu.sh
-# Other GPUs:  GPUS="2,3" bash ...      Follow:  tail -f checkpoints/lora_cpt/OLMo-1B-hf/cult_50M_7languages_ep1_seed42.log
+# Other GPUs:  GPUS="2,3" bash ...
+# Another rater ranking (same flow): METHOD=avg4 SCORES=avg4_mean bash sh/pipelines/run_olmo_cult_2gpu.sh
+#   (SCORES = a folder of data/pilot_scores_7languages/; output and log names follow METHOD)
+# Follow:  tail -f checkpoints/lora_cpt/OLMo-1B-hf/cult_50M_7languages_ep1_seed42.log
 
 set -eo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -22,18 +25,20 @@ MODEL="${MODEL:-allenai/OLMo-1B-hf}"
 TARGET_TOKENS="${TARGET_TOKENS:-50000000}"
 BUDGET="${BUDGET:-50M}"
 SEED="${SEED:-42}"
+METHOD="${METHOD:-cult}"                       # run / selection name
+SCORES="${SCORES:-cultural_nuances_mean}"      # data/pilot_scores_7languages/<SCORES>: the ranking
 POOL_DIR=data/pilot_corpus_7languages
-SELECTION="data/pilot_selected/cult_${BUDGET}_7languages_olmo"
-RUN="cult_${BUDGET}_7languages"
+SELECTION="data/pilot_selected/${METHOD}_${BUDGET}_7languages_olmo"
+RUN="${METHOD}_${BUDGET}_7languages"
 ROOT="checkpoints/lora_cpt/${MODEL##*/}"
 LOG="$ROOT/${RUN}_ep1_seed${SEED}.log"
 NPROC=$(echo "$GPUS" | tr ',' '\n' | grep -c .)
 export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1
 
 if [ ! -f "$SELECTION/documents.csv" ]; then
-  echo "=== select: top cultural nuance, $TARGET_TOKENS OLMo tokens per language -> $SELECTION (~25 min) ==="
+  echo "=== select: top $SCORES, $TARGET_TOKENS OLMo tokens per language -> $SELECTION (~25 min) ==="
   "$PYTHON" -m src.train_gpt2_from_scratch.prepare_data --method top-score --pool-dir "$POOL_DIR" \
-    --scores-dir data/pilot_scores_7languages/cultural_nuances_mean --output-dir "$SELECTION" \
+    --scores-dir "data/pilot_scores_7languages/$SCORES" --output-dir "$SELECTION" \
     --tokenizer "$MODEL" --select-by tokens --target-tokens "$TARGET_TOKENS"
 fi
 
