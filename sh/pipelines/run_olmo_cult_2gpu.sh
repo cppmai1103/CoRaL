@@ -14,6 +14,8 @@
 # Other GPUs:  GPUS="2,3" bash ...
 # Another rater ranking (same flow): METHOD=avg4 SCORES=avg4_mean bash sh/pipelines/run_olmo_cult_2gpu.sh
 #   (SCORES = a folder of data/pilot_scores_7languages/; output and log names follow METHOD)
+# Gemma (selections counted with the Gemma tokenizer have no _olmo suffix; its 262k-vocab logits need micro-batch 2):
+#   MODEL=google/gemma-3-1b-pt SUFFIX= MICRO_BATCH_SIZE=2 EVAL_BATCH_SIZE=2 METHOD=rr4 bash ...
 # Follow:  tail -f checkpoints/lora_cpt/OLMo-1B-hf/cult_50M_7languages_ep1_seed42.log
 
 set -eo pipefail
@@ -27,8 +29,9 @@ BUDGET="${BUDGET:-50M}"
 SEED="${SEED:-42}"
 METHOD="${METHOD:-cult}"                       # run / selection name
 SCORES="${SCORES:-cultural_nuances_mean}"      # data/pilot_scores_7languages/<SCORES>: the ranking
+SUFFIX="${SUFFIX-_olmo}"                        # selection folder suffix (OLMo-counted: _olmo; Gemma-counted: empty)
 POOL_DIR=data/pilot_corpus_7languages
-SELECTION="data/pilot_selected/${METHOD}_${BUDGET}_7languages_olmo"
+SELECTION="data/pilot_selected/${METHOD}_${BUDGET}_7languages${SUFFIX}"
 RUN="${METHOD}_${BUDGET}_7languages"
 ROOT="checkpoints/lora_cpt/${MODEL##*/}"
 LOG="$ROOT/${RUN}_ep1_seed${SEED}.log"

@@ -55,8 +55,8 @@ for b in benches:
     done.append(b)
     with path.open(encoding="utf-8") as f:
         for r in csv.DictReader(f):
-            r["score"] = float(r["score"]) if r["score"] not in ("", "None") else None
-            r["stderr"] = float(r["stderr"]) if r["stderr"] not in ("", "None") else None
+            r["score"] = float(r["score"]) if r["score"] not in ("", "None", "N/A") else None
+            r["stderr"] = float(r["stderr"]) if r["stderr"] not in ("", "None", "N/A") else None
             r["n"], r["shots"] = int(r["n"]), int(r["shots"])
             rows.append(r)
 if rows:
